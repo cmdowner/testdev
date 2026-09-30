@@ -1,6 +1,6 @@
--- ARG CORE V7 - single-file Roblox Luau interface
+-- ARG CORE V7 - single-file Roblox executor script
 -- Target: Highschool Experience RP by Master Works, place 112333343527957.
--- Put this in a LocalScript under StarterPlayerScripts, or run it on the client.
+-- Run this script through your Roblox executor.
 -- Panels and controls are Roblox UI objects. Lucide icons and the A logo are
 -- embedded, with code-drawn fallback icons when local assets are unavailable.
 -- Feature reference: https://github.com/KimDawude/MinuHub/blob/main/MinuHub
@@ -24,9 +24,9 @@ if not player then
 end
 local TARGET_PLACE_ID = 112333343527957
 local TARGET_UNIVERSE_ID = 10394064134
--- A numeric Roblox image asset ID works in Studio. In executor clients that
--- expose local image assets, the exact supplied transparent PNG is embedded
--- below and used automatically. Otherwise a code-drawn A is the fallback.
+-- A numeric Roblox image asset ID can be used for an uploaded logo. Executors
+-- with local-image asset support use the embedded transparent PNG below
+-- automatically. Otherwise a code-drawn A is the fallback.
 local BRAND_LOGO_ASSET_ID = ""
 local EMBEDDED_A_PNG_BASE64 = [=[
 iVBORw0KGgoAAAANSUhEUgAABOYAAATmCAYAAACF/K4qAABVeWNhQlgAAFV5anVtYgAAAB5qdW1kYzJwYQARABCAAACqADibcQNjMnBhAAAAVVNqdW1iAAAA
@@ -7265,8 +7265,8 @@ local function circle(parent, x, y, size, color, thickness)
 	return ring
 end
 
--- The bitmap is used when the client supports local assets. Draw the angular A
--- in UI primitives for ordinary LocalScripts without an uploaded image asset.
+-- Executors with local-image asset support use the bitmap. The angular A
+-- drawn from UI primitives is the fallback when no image asset is available.
 local function icon(parent, kind, x, y, size, tint)
 	local group = frame(parent, x, y, size, size, C.background, 1)
 	local c = tint or C.platinum
