@@ -6,8 +6,10 @@
 -- Feature reference: https://github.com/KimDawude/MinuHub/blob/main/MinuHub
 -- Combat reference: the recovered AuraKill script supplied with this project.
 -- Unarmed combat, bounded request scheduling, and UTF-8 RP effects are implemented.
--- Revision: executor repair 2026-09-30. Use Combat > Learn Punch for a changed route.
--- Combat: enter the fight area, click Learn Punch, land one normal punch, then enable Omega Aura.
+-- Revision: screen-click repair 2026-10-01. Screen Click input is the default combat mode.
+-- Combat: keep Screen Click Combat on, enable Omega Aura, enter the fight area, close the menu, and face a nearby target.
+-- Screen Click uses normal attack input; the game controls targeting, range, and damage.
+-- Remote mode remains optional and requires a usable/learned combat route.
 -- RP: Visuals > RP Name & Bio > enter text > Apply RP Text, or enable an effect.
 -- The game server still decides damage and server-side protection.
 
@@ -7397,11 +7399,11 @@ controls.LimitText = function(value, maxBytes)
 	return value:sub(1, utf8.offset(value, 0, maxBytes + 1) - 1)
 end
 controls.toggleDefaults = {
-	["UI Animations"] = true, ["UI Sounds"] = true,
+	["UI Animations"] = true, ["UI Sounds"] = true, ["Screen Click Combat"] = true,
 	["Continuous Attack"] = true, ["Priority Targeting"] = true,
 }
 for name, value in pairs(controls.toggleDefaults) do controls.toggles[name] = value end
-local toggleCaptions = { ["Anti-Grab"] = "Anti-Grab Glitch" }
+local toggleCaptions = { ["Anti-Grab"] = "Anti-Grab Glitch", ["Screen Click Combat"] = "Screen Click Input" }
 local hooks = { toggles = {}, sliders = {}, texts = {} }
 local actionHandlers = {}
 local listEntries = { ["Targets List"] = {}, ["Friends List"] = {},
@@ -8033,8 +8035,9 @@ end
 local definitions = {
 	Combat = {
 		{"Omega Aura", "A", {"Omega Aura", "Kill Aura"}, combatSliders},
-		{"Aura Attack Rate", "Combat", {},
-			{S("Aura APS", 1, 10, 5, 0, 1, "Total Requests / Second"),
+		{"Aura Attack Rate", "Combat", {"Screen Click Combat"},
+			{S("Aura APS", 1, 10, 5, 0, 1, "Inputs / Requests Per Second"),
+				S("Click Activation Range", 1, 30, 12, 0, 1, "Click Activation Radius"),
 				S("Hit Position Mode", 1, 4, 4, 0, 1, "Hit Arguments")}, {"Learn Punch", "Copy Diagnostics"}},
 		{"Targeting & Attack Modes", "Targets", {
 			"Server-Wide Targeting", "Remote Strike", "Multi-Target Mode",
@@ -8189,7 +8192,7 @@ buildPage = function(tabName)
 				28, 189, 470, 22, 11, C.platinum)
 			label(scroll, "CURRENT PLACE  " .. tostring(game.PlaceId),
 				28, 213, 470, 22, 11, C.muted)
-			label(scroll, "Unarmed combat uses the game service; the server controls damage and carry.",
+			label(scroll, "Screen Click uses normal input; the server controls targeting/range/damage.",
 				28, 248, 470, 22, 11, C.bright)
 			for i, entry in ipairs({
 				"DEVELOPER  ARG CORE TEAM",
@@ -8963,8 +8966,11 @@ actionHandlers["Load Config"] = function()
 			end
 		end
 	end
+	if data.toggles and type(data.toggles["Screen Click Combat"]) == "boolean" then
+		setToggle("Screen Click Combat", data.toggles["Screen Click Combat"])
+	end
 	for name, value in pairs(data.toggles or {}) do
-		if controls.knownToggles[name] and type(value) == "boolean" then setToggle(name, value) end
+		if name ~= "Screen Click Combat" and controls.knownToggles[name] and type(value) == "boolean" then setToggle(name, value) end
 	end
 	notify("Loaded config slot " .. configSlot())
 end
@@ -9184,7 +9190,197 @@ GameAdapter.TargetAllowed = function(other)
 	if friend then return false, "friends" end
 	return true
 end
+-- Normal attack input only. The game selects hits and validates range/damage.
+-- Candidate selection is an activation guard, not a claim of directed damage.
+GameAdapter.click = {alive = true, focused = false, focusKnown = false,
+	requests = 0, sent = 0, completed = 0, failed = 0, busy = false, held = false}
+GameAdapter.ClickAPI = function()
+	local env = executorGlobal()
+	local click = type(mouse1click) == "function" and mouse1click or env.mouse1click
+	local press = type(mouse1press) == "function" and mouse1press or env.mouse1press
+	local release = type(mouse1release) == "function" and mouse1release or env.mouse1release
+	if type(click) == "function" then return "mouse1click", click end
+	if type(press) == "function" and type(release) == "function" then
+		return "mouse1press/release", press, release
+	end
+	return nil
+end
+GameAdapter.ClickRange = function()
+	return math.clamp(controls.sliders["Click Activation Range"] or 12, 1, 30)
+end
+GameAdapter.ReleaseClick = function(force)
+	local state = GameAdapter.click
+	if not state.held then return true end
+	if not force and os.clock() < (state.releaseAt or 0) then return false end
+	local okay, result = pcall(state.release)
+	if okay and result ~= false then
+		state.held, state.release = false, nil
+		if state.pressAccepted then state.completed += 1 end
+		state.pressAccepted = nil
+		return true
+	end
+	state.failed += 1
+	state.lastError = "Click release failed: " .. tostring(result):sub(1, 120)
+	state.pauseReason = state.lastError
+	state.releaseAt = os.clock() + 0.5
+	return false -- Keep the held latch: no new presses until a release succeeds.
+end
+GameAdapter.ClickInputReady = function()
+	local state = GameAdapter.click
+	if not state.alive or not gui.Parent then return false, "UI closed" end
+	if main.Visible then return false, "Close the ARG menu" end
+	local env = executorGlobal()
+	local active = type(isrbxactive) == "function" and isrbxactive or env.isrbxactive
+	if type(active) ~= "function" then
+		active = type(iswindowactive) == "function" and iswindowactive or env.iswindowactive
+	end
+	if type(active) == "function" then
+		local okay, value = pcall(active)
+		if not okay or value ~= true then return false, "Roblox window not focused" end
+	elseif not state.focusKnown or not state.focused then
+		return false, "Click inside Roblox to establish focus"
+	end
+	local okay, focused = pcall(function() return UserInputService:GetFocusedTextBox() end)
+	if not okay or focused ~= nil then return false, "Text input focused or unavailable" end
+	local menuOkay, menuOpen = pcall(function() return game:GetService("GuiService").MenuIsOpen end)
+	if not menuOkay or menuOpen then return false, "Roblox menu open or unavailable" end
+	local downOkay, down = pcall(function()
+		return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+	end)
+	if not downOkay or (down and not state.held) then return false, "Manual mouse press active" end
+	local positionOkay, position = pcall(function() return UserInputService:GetMouseLocation() end)
+	if not positionOkay or not position then return false, "Mouse position unavailable" end
+	local p, size = open.AbsolutePosition, open.AbsoluteSize
+	if open.Visible and position.X >= p.X and position.X <= p.X + size.X
+		and position.Y >= p.Y and position.Y <= p.Y + size.Y then
+		return false, "Cursor over ARG open button"
+	end
+	local objectsOkay, objects = pcall(function()
+		return player:FindFirstChildOfClass("PlayerGui"):GetGuiObjectsAtPosition(position.X, position.Y)
+	end)
+	if not objectsOkay then return false, "Game UI hit testing unavailable" end
+	for _, object in ipairs(objects) do
+		if object:IsA("GuiButton") or object:IsA("TextBox")
+			or object:IsA("ScrollingFrame") or object.Active then
+			return false, "Cursor over game UI"
+		end
+	end
+	return true
+end
+GameAdapter.ClickTargetReady = function(candidate)
+	local state = GameAdapter.click
+	local ownCharacter = player.Character
+	local ownRoot = ownCharacter and ownCharacter:FindFirstChild("HumanoidRootPart")
+	local ownHumanoid = ownCharacter and ownCharacter:FindFirstChildOfClass("Humanoid")
+	if not ownRoot or not ownHumanoid or ownHumanoid.Health <= 0 then return false, "Character not ready" end
+	if GameAdapter.FightingState() ~= true then return false, "Enter the fight area (Fighting must be true)" end
+	local other = candidate and candidate.player
+	local character = other and other.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not other or other.Parent ~= Players or not root or not humanoid or humanoid.Health <= 0 then
+		return false, "No live nearby target"
+	end
+	local allowed, reason = GameAdapter.TargetAllowed(other)
+	if not allowed then return false, "Target blocked: " .. tostring(reason) end
+	if (ownRoot.Position - root.Position).Magnitude > GameAdapter.ClickRange() then
+		return false, "Target outside click activation radius"
+	end
+	-- A normal click does not address a particular player. Fail closed if any
+	-- excluded/unknown player is nearby; do not promise a friend-proof server hit.
+	local safetyRange = math.max(24, GameAdapter.ClickRange())
+	for _, nearby in ipairs(Players:GetPlayers()) do
+		local rig = nearby.Character
+		local nearbyRoot = rig and rig:FindFirstChild("HumanoidRootPart")
+		local nearbyHumanoid = rig and rig:FindFirstChildOfClass("Humanoid")
+		if nearby ~= player and nearbyRoot and nearbyHumanoid and nearbyHumanoid.Health > 0
+			and (ownRoot.Position - nearbyRoot.Position).Magnitude <= safetyRange then
+			local okay, why = GameAdapter.TargetAllowed(nearby)
+			if not okay then return false, "Excluded player nearby: " .. tostring(why) end
+		end
+	end
+	state.pauseReason = nil
+	return true, nil, ownCharacter, character
+end
+GameAdapter.CallClick = function(candidate)
+	local state, clock = GameAdapter.click, os.clock()
+	if not controls.toggles["Omega Aura"] or state.busy or state.held
+		or clock < GameAdapter.nextDispatch or clock < GameAdapter.retryAt then return false end
+	local ready, reason = GameAdapter.ClickInputReady()
+	if not ready then state.pauseReason = reason; return false end
+	local targetReady, targetReason, ownCharacter, targetCharacter = GameAdapter.ClickTargetReady(candidate)
+	if not targetReady then state.pauseReason = targetReason; return false end
+	local api, input, release = GameAdapter.ClickAPI()
+	if not api then state.pauseReason = "Executor has no screen-click API"; return false end
+	state.api, state.busy, state.started = api, true, clock
+	GameAdapter.nextDispatch = clock + GameAdapter.Interval()
+	local epoch = GameAdapter.auraEpoch
+	local thread = task.spawn(function()
+		local ownThread = coroutine.running() or GameAdapter
+		state.thread = ownThread
+		local okay, err = pcall(function()
+			if not controls.toggles["Omega Aura"] or not controls.toggles["Screen Click Combat"]
+				or not state.alive or not gui.Parent or epoch ~= GameAdapter.auraEpoch
+				or player.Character ~= ownCharacter or candidate.player.Character ~= targetCharacter then return end
+			local inputReady, inputReason = GameAdapter.ClickInputReady()
+			if not inputReady then state.pauseReason = inputReason; return end
+			local allowed, why = GameAdapter.ClickTargetReady(candidate)
+			if not allowed then state.pauseReason = why; return end
+			state.requests += 1
+			GameAdapter.ownCalls[ownThread] = true
+			if release then
+				state.held, state.release, state.releaseAt = true, release, os.clock() + 0.04
+			end
+			local result = input()
+			if result == false then error("Executor rejected screen click") end
+			state.sent += 1
+			if release then state.pressAccepted = true else state.completed += 1 end
+			state.pauseReason, state.lastError = nil, nil
+			GameAdapter.failureStreak = 0
+		end)
+		GameAdapter.ownCalls[ownThread] = nil
+		state.busy = false
+		if state.thread == ownThread then state.thread = nil end
+		if not okay then
+			state.failed += 1; GameAdapter.failureStreak += 1
+			state.lastError = tostring(err):sub(1, 160); state.pauseReason = state.lastError
+			GameAdapter.retryAt = os.clock() + math.min(8, 0.5 * 2 ^ math.min(GameAdapter.failureStreak - 1, 4))
+			GameAdapter.ReleaseClick(true)
+		end
+	end)
+	if state.busy then state.thread = thread end
+	return true
+end
+do
+	local state, connections = GameAdapter.click, {}
+	local function connect(event, callback)
+		local okay, connection = pcall(function() return event:Connect(callback) end)
+		if okay then table.insert(connections, connection) end
+	end
+	connect(UserInputService.WindowFocused, function() state.focused, state.focusKnown = true, true end)
+	connect(UserInputService.WindowFocusReleased, function()
+		state.focused, state.focusKnown = false, true
+		GameAdapter.ReleaseClick(true)
+	end)
+	connect(UserInputService.InputBegan, function()
+		if not state.busy and not state.held then state.focused, state.focusKnown = true, true end
+	end)
+	connect(RunService.Heartbeat, function() GameAdapter.ReleaseClick(false) end)
+	gui.Destroying:Connect(function()
+		state.alive = false
+		if state.thread and type(task.cancel) == "function" then
+			if pcall(task.cancel, state.thread) then
+				GameAdapter.ownCalls[state.thread] = nil
+				state.thread, state.busy = nil, false
+			end
+		end
+		GameAdapter.ReleaseClick(true)
+		for _, connection in ipairs(connections) do connection:Disconnect() end
+	end)
+end
+
 GameAdapter.InRange = function(distance)
+	if controls.toggles["Screen Click Combat"] then return distance <= GameAdapter.ClickRange() end
 	return controls.toggles["Server-Wide Targeting"]
 		or (distance <= (controls.sliders["Target Scan Range"] or 3000)
 			and (controls.toggles["Remote Strike"] or distance <= (controls.sliders["Adjustable Range"] or 8)))
@@ -9503,6 +9699,16 @@ GameAdapter.CallAura = function(remote, candidate)
 	return true
 end
 GameAdapter.Attack = function(candidates, limit)
+	if controls.toggles["Screen Click Combat"] then
+		GameAdapter.Mode = "ScreenClickInput"
+		if #candidates == 0 then GameAdapter.click.pauseReason = "No eligible nearby target"; return false end
+		for _, candidate in ipairs(candidates) do
+			if GameAdapter.CallClick(candidate) then
+				return true, candidate.player, candidate.player.Character
+			end
+		end
+		return false
+	end
 	local remote = GameAdapter.AuraRemote()
 	if not remote or #candidates == 0 then return false end
 	GameAdapter.Mode = GameAdapter.learnedRemote == remote and "ObservedUnarmedPunch" or "CombatServiceHit"
@@ -9521,20 +9727,54 @@ GameAdapter.Attack = function(candidates, limit)
 end
 runtimeGuards["Remote Strike"] = function()
 	if not inTargetExperience then return "Remote Strike is configured for Highschool Experience RP" end
+	if controls.toggles["Screen Click Combat"] then return "Screen clicks use normal game range; Remote Strike needs remote mode" end
 	if not GameAdapter.AuraRemote() then return "Enter the fight area, click Learn Punch, and punch normally" end
 end
-runtimeGuards["Omega Aura"] = runtimeGuards["Remote Strike"]
+runtimeGuards["Omega Aura"] = function()
+	if not inTargetExperience then return "Open Highschool Experience RP first" end
+	if controls.toggles["Screen Click Combat"] then
+		if not GameAdapter.ClickAPI() then return "Executor has no mouse1click or mouse1press/release; screen input unavailable" end
+		return nil
+	end
+	return runtimeGuards["Remote Strike"]()
+end
 runtimeGuards["Kill Aura"] = runtimeGuards["Omega Aura"]
+for _, name in ipairs({"Server-Wide Targeting", "Multi-Target Mode"}) do
+	runtimeGuards[name] = function()
+		if controls.toggles["Screen Click Combat"] then
+			return "Screen clicks use the game's own targeting; this mode requires a verified remote"
+		end
+	end
+end
+hooks.toggles["Screen Click Combat"] = function(enabled)
+	setToggle("Omega Aura", false)
+	GameAdapter.ReleaseClick(true)
+	GameAdapter.auraEpoch += 1; GameAdapter.nextDispatch = -math.huge
+	GameAdapter.Mode = enabled and "ScreenClickInput" or "UnarmedCombat"
+	if enabled then
+		for _, name in ipairs({"Server-Wide Targeting", "Remote Strike", "Multi-Target Mode"}) do setToggle(name, false) end
+		notify("Screen Click input selected; close the menu and face a nearby target. The game controls hits/range")
+	else notify("Remote combat selected; use Learn Punch if the remote route changed") end
+end
 hooks.toggles["Omega Aura"] = function(enabled)
 	GameAdapter.auraEpoch += 1; GameAdapter.roundRobin = 0
 	if controls.toggles["Kill Aura"] ~= enabled then setToggle("Kill Aura", enabled) end
-	if enabled then notify("Unarmed combat enabled; enter the fight area and use Learn Punch if hits are rejected") end
+	if not enabled then GameAdapter.ReleaseClick(true) end
+	if enabled then
+		if controls.toggles["Screen Click Combat"] then
+			notify("Screen Click combat enabled; enter the fight area, close the ARG menu, and face a nearby target")
+		else notify("Unarmed remote combat enabled; enter the fight area and use Learn Punch if hits are rejected") end
+	end
 end
 hooks.toggles["Kill Aura"] = function(enabled)
 	if controls.toggles["Omega Aura"] ~= enabled then setToggle("Omega Aura", enabled) end
 end
 actionHandlers["Learn Punch"] = function()
 	if not inTargetExperience then notify("Open Highschool Experience RP first"); return end
+	if controls.toggles["Screen Click Combat"] then
+		notify("Screen Click input needs no learned remote. Disable Screen Click Combat to use remote learning")
+		return
+	end
 	if not GameAdapter.observerAvailable then notify("This executor cannot observe normal punch calls"); return end
 	setToggle("Omega Aura", false)
 	setSlider("Hit Position Mode", 4)
@@ -9543,6 +9783,19 @@ actionHandlers["Learn Punch"] = function()
 end
 GameAdapter.Status = function()
 	if not inTargetExperience then return "AURA: TARGET GAME MISMATCH" end
+	if controls.toggles["Screen Click Combat"] then
+		local state = GameAdapter.click
+		if not GameAdapter.ClickAPI() then return "CLICK: EXECUTOR INPUT API UNAVAILABLE" end
+		if state.held then return "CLICK: WAITING FOR BUTTON RELEASE" end
+		if state.busy then return "CLICK: INPUT CALL PENDING" end
+		if GameAdapter.FightingState() ~= true then return "CLICK: ENTER THE FIGHT AREA" end
+		local ready, reason = GameAdapter.ClickInputReady()
+		if not ready then return "CLICK: PAUSED / " .. reason end
+		if not controls.toggles["Omega Aura"] then return "CLICK: READY / ENABLE OMEGA AURA" end
+		if os.clock() < GameAdapter.retryAt then return "CLICK: INPUT ERROR / BACKOFF" end
+		if state.pauseReason then return "CLICK: PAUSED / " .. state.pauseReason end
+		return string.format("CLICK: %d INPUTS / %d FAILED / NORMAL GAME RANGE", state.sent, state.failed)
+	end
 	if GameAdapter.learnUntil and os.clock() <= GameAdapter.learnUntil then return "AURA: LEARNING / LAND A NORMAL PUNCH" end
 	if GameAdapter.FightingState() == false then return "AURA: ENTER THE FIGHT AREA" end
 	if not GameAdapter.AuraRemote() then return "AURA: CLICK LEARN PUNCH" end
@@ -9598,17 +9851,19 @@ do
 			if okay then state = tostring(value) end
 		end
 		return {
-			revision = "ARG CORE V7 / executor repair 2026-09-30", placeId = game.PlaceId,
+			revision = "ARG CORE V7 / screen-click repair 2026-10-01", placeId = game.PlaceId,
 			universeId = game.GameId, expectedPlaceId = TARGET_PLACE_ID, correctGame = inTargetExperience,
 			capabilities = {getconnections = type(getconnections) == "function",
 				hookmetamethod = type(hookmetamethod) == "function",
 				getnamecallmethod = type(getnamecallmethod) == "function",
 				checkcaller = type(checkcaller) == "function", firetouchinterest = type(firetouchinterest) == "function",
 				clipboard = type(setclipboard or toclipboard or setrbxclipboard or env.setclipboard) == "function",
-				writefile = type(writefile) == "function"},
+				writefile = type(writefile) == "function",
+				screenClick = GameAdapter.ClickAPI() ~= nil},
 			combat = {exactRemote = GameAdapter.KnownAuraRemote() ~= nil, remotePath = remotePath,
 				learnedRoute = GameAdapter.learnedRemote ~= nil, fighting = GameAdapter.FightingState(),
-				mode = GameAdapter.Mode, hitArguments = GameAdapter.hitProfile or "origin",
+				mode = controls.toggles["Screen Click Combat"] and "ScreenClickInput" or GameAdapter.Mode,
+				status = GameAdapter.Status(), hitArguments = GameAdapter.hitProfile or "origin",
 				positionMode = controls.sliders["Hit Position Mode"] or 4,
 				observerAvailable = GameAdapter.observerAvailable, observedCalls = GameAdapter.observedCalls or 0,
 				observerError = GameAdapter.observerError, requests = GameAdapter.auraSent,
@@ -9618,7 +9873,16 @@ do
 				attackInterval = controls.sliders["Attack Speed"], auraAPS = controls.sliders["Aura APS"],
 				range = controls.sliders["Adjustable Range"], maxPending = GameAdapter.maxInFlight,
 				oldestPendingSeconds = GameAdapter.OldestRequest(), lastRequestSeconds = GameAdapter.lastRequestSeconds,
-				backoffSeconds = math.max(0, GameAdapter.retryAt - os.clock()), effectiveInterval = GameAdapter.Interval()},
+				backoffSeconds = math.max(0, GameAdapter.retryAt - os.clock()), effectiveInterval = GameAdapter.Interval(),
+				clickInput = {enabled = controls.toggles["Screen Click Combat"] == true,
+					supported = GameAdapter.ClickAPI() ~= nil, api = GameAdapter.ClickAPI(),
+					requests = GameAdapter.click.requests, sent = GameAdapter.click.sent,
+					completed = GameAdapter.click.completed, failed = GameAdapter.click.failed,
+					busy = GameAdapter.click.busy, held = GameAdapter.click.held,
+					pendingSeconds = GameAdapter.click.busy and os.clock() - GameAdapter.click.started or 0,
+					activationRadius = GameAdapter.ClickRange(), safetyRadius = math.max(24, GameAdapter.ClickRange()),
+					pauseReason = GameAdapter.click.pauseReason, lastError = GameAdapter.click.lastError,
+					directedTargeting = false, serverDamageVerified = false}},
 			rp = {requests = controls.rpRuntime and controls.rpRuntime.sent or 0,
 				completed = controls.rpRuntime and controls.rpRuntime.completed or 0,
 				failed = controls.rpRuntime and controls.rpRuntime.failed or 0,
@@ -10173,6 +10437,9 @@ do
 		local requestEpoch = epoch
 		local okay, err = pcall(function()
 			local candidates = scanTargets()
+			if controls.toggles["Screen Click Combat"] and #candidates == 0 then
+				GameAdapter.click.pauseReason = "No eligible nearby target"
+			end
 			if not gui.Parent or not controls.toggles["Omega Aura"] or requestEpoch ~= GameAdapter.auraEpoch then return end
 			local lastTargetStillValid = false
 			for _, candidate in ipairs(candidates) do
