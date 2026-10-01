@@ -5,8 +5,10 @@
 -- embedded, with code-drawn fallback icons when local assets are unavailable.
 -- Feature reference: https://github.com/KimDawude/MinuHub/blob/main/MinuHub
 -- Combat reference: the recovered AuraKill script supplied with this project.
--- Client-side movement, visuals, target hitboxes, and equipped Tool input are
--- implemented here, including AuraKill's CombatService Hit signature and APS.
+-- Unarmed combat, bounded request scheduling, and UTF-8 RP effects are implemented.
+-- Revision: executor repair 2026-09-30. Use Combat > Learn Punch for a changed route.
+-- Combat: enter the fight area, click Learn Punch, land one normal punch, then enable Omega Aura.
+-- RP: Visuals > RP Name & Bio > enter text > Apply RP Text, or enable an effect.
 -- The game server still decides damage and server-side protection.
 
 local Players = game:GetService("Players")
@@ -7386,7 +7388,14 @@ local function icon(parent, kind, x, y, size, tint)
 end
 
 local controls = { toggles = {}, sliders = {}, texts = {},
-	toggleViews = {}, sliderViews = {}, textViews = {} }
+	toggleViews = {}, sliderViews = {}, textViews = {}, sliderSpecs = {}, scanRevision = 0 }
+controls.LimitText = function(value, maxBytes)
+	value = tostring(value or "")
+	local okay, length = pcall(utf8.len, value)
+	if not okay or length == nil then return "" end
+	if #value <= maxBytes then return value end
+	return value:sub(1, utf8.offset(value, 0, maxBytes + 1) - 1)
+end
 controls.toggleDefaults = {
 	["UI Animations"] = true, ["UI Sounds"] = true,
 	["Continuous Attack"] = true, ["Priority Targeting"] = true,
@@ -7430,6 +7439,7 @@ local function setToggle(name, value)
 		end
 	end
 	controls.toggles[name] = value
+	controls.scanRevision += 1
 	for _, render in ipairs(controls.toggleViews[name] or {}) do render(value) end
 	if hooks.toggles[name] then hooks.toggles[name](value) end
 end
@@ -7490,7 +7500,11 @@ local function setSlider(name, value)
 		if reportUnavailable then reportUnavailable(unavailableSliders[name]) end
 		return
 	end
+	if type(value) ~= "number" or value ~= value or math.abs(value) == math.huge then return end
+	local spec = controls.sliderSpecs[name]
+	if spec then value = math.clamp(value, spec.min, spec.max) end
 	controls.sliders[name] = value
+	controls.scanRevision += 1
 	for _, render in ipairs(controls.sliderViews[name] or {}) do render(value) end
 	if hooks.sliders[name] then hooks.sliders[name](value) end
 end
@@ -7563,8 +7577,10 @@ end
 
 local S = function(name, min, max, default, precision, step, displayName)
 	sliderDefaults[name] = default
-	return {name = name, min = min, max = max, default = default,
+	local spec = {name = name, min = min, max = max, default = default,
 		precision = precision or 0, step = step or 1, displayName = displayName}
+	controls.sliderSpecs[name] = spec
+	return spec
 end
 
 local combatToggles = {
@@ -7573,10 +7589,10 @@ local combatToggles = {
 	"Target-Only Mode", "Priority Targeting",
 }
 local combatSliders = {
-	S("Adjustable Range", 1, 3000, 50, 0, 1, "Aura Range"),
-	S("Attack Speed", 0.01, 5, 0.01, 2, 0.01),
+	S("Adjustable Range", 1, 3000, 8, 0, 1, "Aura Range"),
+	S("Attack Speed", 0.1, 5, 0.2, 2, 0.1),
 	S("Combo Speed", 1, 1000, 500), S("Finisher Power", 0, 999, 999),
-	S("Max Targets", 1, 100, 100), S("Target Scan Range", 25, 5000, 3000),
+	S("Max Targets", 1, 100, 1), S("Target Scan Range", 25, 5000, 3000),
 }
 local movementToggles = {"TPWalk", "Fly", "Dash", "Sprint", "Jump Power"}
 local movementSliders = {
@@ -7999,7 +8015,7 @@ local function detailCard(parent, title, glyph, x, y, width, toggles, sliders, a
 		controls.textViews[name] = controls.textViews[name] or {}
 		table.insert(controls.textViews[name], input)
 		input.FocusLost:Connect(function()
-			controls.texts[name] = input.Text:sub(1, 500)
+			controls.texts[name] = controls.LimitText(input.Text, 500)
 			if hooks.texts[name] then hooks.texts[name](controls.texts[name]) end
 		end)
 		pos += 65
@@ -8018,8 +8034,8 @@ local definitions = {
 	Combat = {
 		{"Omega Aura", "A", {"Omega Aura", "Kill Aura"}, combatSliders},
 		{"Aura Attack Rate", "Combat", {},
-			{S("Aura APS", 1, 10000, 5000, 0, 1, "Aura Attacks / Second"),
-				S("Hit Position Mode", 1, 4, 4, 0, 1, "Hit Arguments")}, {"Copy Diagnostics"}},
+			{S("Aura APS", 1, 10, 5, 0, 1, "Total Requests / Second"),
+				S("Hit Position Mode", 1, 4, 4, 0, 1, "Hit Arguments")}, {"Learn Punch", "Copy Diagnostics"}},
 		{"Targeting & Attack Modes", "Targets", {
 			"Server-Wide Targeting", "Remote Strike", "Multi-Target Mode",
 			"Continuous Attack", "Auto Re-Target", "Target-Only Mode",
@@ -8044,9 +8060,10 @@ local definitions = {
 		{"Visuals & Rendering", "Visuals", visualToggles, visualSliders},
 		{"RP Name & Bio", "Visuals", {"Rainbow Colors", "Name Typewriter",
 			"Bio Typewriter", "Bio Blinker"},
-			{S("Color Preset", 1, 3, 1), S("Color Speed", 1, 30, 8),
-				S("Name Speed", 1, 20, 5), S("Bio Speed", 1, 30, 15),
-				S("Blink Speed", 1, 10, 5)}, {}, {}, {"Bio Phrases", "Blink Phrases"}},
+			{S("Color Preset", 1, 4, 4), S("Color Speed", 1, 4, 4),
+				S("Name Speed", 1, 8, 5), S("Bio Speed", 1, 8, 5),
+				S("Blink Speed", 1, 4, 2)}, {"Apply RP Text", "Reset RP Effects"}, {},
+			{"RP Name", "Bio Text", "Bio Phrases", "Blink Phrases"}},
 	},
 	Targets = {
 		{"Targeting Rules", "Targets", {"Same-Team Protection", "Server Validation", "Auto Re-Target"}, {}},
@@ -8172,7 +8189,7 @@ buildPage = function(tabName)
 				28, 189, 470, 22, 11, C.platinum)
 			label(scroll, "CURRENT PLACE  " .. tostring(game.PlaceId),
 				28, 213, 470, 22, 11, C.muted)
-			label(scroll, "Gear activation is local input; damage and server carry need game logic.",
+			label(scroll, "Unarmed combat uses the game service; the server controls damage and carry.",
 				28, 248, 470, 22, 11, C.bright)
 			for i, entry in ipairs({
 				"DEVELOPER  ARG CORE TEAM",
@@ -8270,18 +8287,76 @@ local function clearFly()
 end
 hooks.toggles.Fly = function(enabled) if not enabled then clearFly() end end
 
+do
+	local cache = {dirty = true, all = {}, parts = {}, visuals = {}, connections = {}, rebuilds = 0}
+	controls.characterCache = cache
+	cache.Clear = function()
+		for _, connection in ipairs(cache.connections) do connection:Disconnect() end
+		table.clear(cache.connections)
+		cache.character, cache.dirty = nil, true
+		table.clear(cache.all); table.clear(cache.parts); table.clear(cache.visuals)
+	end
+	controls.CharacterItems = function(character)
+		if cache.character ~= character then
+			cache.Clear(); cache.character = character
+			if character then
+				for _, event in ipairs({character.DescendantAdded, character.DescendantRemoving}) do
+					table.insert(cache.connections, event:Connect(function() cache.dirty = true end))
+				end
+				table.insert(cache.connections, character.DescendantRemoving:Connect(function(item)
+					-- Release removed accessories/parts immediately instead of retaining them until disable.
+					if originalTransparency[item] ~= nil then
+						pcall(function() item.LocalTransparencyModifier = originalTransparency[item] end)
+						originalTransparency[item] = nil
+					end
+					if originalDecalTransparency[item] ~= nil then
+						pcall(function() item.Transparency = originalDecalTransparency[item] end)
+						originalDecalTransparency[item] = nil
+					end
+					if originalCollisions[item] ~= nil then
+						pcall(function() item.CanCollide = originalCollisions[item] end)
+						originalCollisions[item] = nil
+					end
+				end))
+			end
+		end
+		if character and cache.dirty then
+			cache.all = character:GetDescendants()
+			table.clear(cache.parts); table.clear(cache.visuals)
+			for _, item in ipairs(cache.all) do
+				if item:IsA("BasePart") then
+					table.insert(cache.parts, item); table.insert(cache.visuals, item)
+				elseif item:IsA("Decal") or item:IsA("Texture") then table.insert(cache.visuals, item) end
+			end
+			cache.dirty = false; cache.rebuilds += 1
+		end
+		return cache
+	end
+	controls.RestoreGhost = function()
+		for part, original in pairs(originalTransparency) do
+			if part.Parent then pcall(function() part.LocalTransparencyModifier = original end) end
+		end
+		for item, original in pairs(originalDecalTransparency) do
+			if item.Parent then pcall(function() item.Transparency = original end) end
+		end
+		table.clear(originalTransparency); table.clear(originalDecalTransparency)
+	end
+	gui.Destroying:Connect(function() controls.RestoreGhost(); cache.Clear() end)
+end
+
 local function refreshGhost()
+	if not controls.toggles["Ghost Mode"] then controls.RestoreGhost(); return end
 	local character = player.Character
 	if not character then return end
 	local enabled = controls.toggles["Ghost Mode"] == true
 	local alpha = (controls.sliders["Ghost Transparency"] or 45) / 100
-	for _, part in ipairs(character:GetDescendants()) do
+	for _, part in ipairs(controls.CharacterItems(character).visuals) do
 		if part:IsA("BasePart") then
 			if enabled then
 				if originalTransparency[part] == nil then
 					originalTransparency[part] = part.LocalTransparencyModifier
 				end
-				part.LocalTransparencyModifier = alpha
+				if part.LocalTransparencyModifier ~= alpha then part.LocalTransparencyModifier = alpha end
 			elseif originalTransparency[part] ~= nil then
 				part.LocalTransparencyModifier = originalTransparency[part]
 				originalTransparency[part] = nil
@@ -8291,7 +8366,7 @@ local function refreshGhost()
 				if originalDecalTransparency[part] == nil then
 					originalDecalTransparency[part] = part.Transparency
 				end
-				part.Transparency = alpha
+				if part.Transparency ~= alpha then part.Transparency = alpha end
 			elseif originalDecalTransparency[part] ~= nil then
 				part.Transparency = originalDecalTransparency[part]
 				originalDecalTransparency[part] = nil
@@ -8437,7 +8512,7 @@ do
 		local function add(object)
 			if object and not seen[object] then seen[object] = true; table.insert(objects, object) end
 		end
-		for _, object in ipairs(character:GetDescendants()) do
+		for _, object in ipairs(controls.CharacterItems(character).all) do
 			add(object)
 			if object:IsA("BasePart") then
 				-- A carry weld may be parented to the carrier, outside our rig.
@@ -8515,7 +8590,11 @@ do
 		for state, enabled in pairs(P.previousStates) do
 			local flyingState = controls.toggles.Fly and (state == Enum.HumanoidStateType.Physics
 				or state == Enum.HumanoidStateType.PlatformStanding)
-			pcall(function() humanoid:SetStateEnabled(state, flyingState and enabled or false) end)
+			pcall(function()
+				local wanted = false
+				if flyingState then wanted = enabled end
+				if humanoid:GetStateEnabled(state) ~= wanted then humanoid:SetStateEnabled(state, wanted) end
+			end)
 		end
 		if not controls.toggles.Fly then
 			local state = humanoid:GetState()
@@ -8524,6 +8603,7 @@ do
 				humanoid.PlatformStand = false
 				humanoid.AutoRotate = true
 				humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+				P.ragdollDetected = false
 			end
 		end
 	end
@@ -8553,6 +8633,18 @@ local function restoreCollisions()
 end
 hooks.toggles.NoClip = function(enabled)
 	if not enabled then restoreCollisions() end
+end
+do
+	local stepped = RunService.Stepped:Connect(function()
+		if not controls.toggles.NoClip or not player.Character then return end
+		for _, part in ipairs(controls.CharacterItems(player.Character).parts) do
+			if part.Parent then
+				if originalCollisions[part] == nil then originalCollisions[part] = part.CanCollide end
+				if part.CanCollide then part.CanCollide = false end
+			end
+		end
+	end)
+	gui.Destroying:Connect(function() stepped:Disconnect(); restoreCollisions() end)
 end
 hooks.toggles["Safe Spot"] = function(enabled)
 	if enabled then
@@ -8854,11 +8946,12 @@ actionHandlers["Load Config"] = function()
 		if sliderDefaults[name] ~= nil and type(value) == "number" then setSlider(name, value) end
 	end
 	for name, value in pairs(data.texts or {}) do
-		if (name == "Bio Phrases" or name == "Blink Phrases") and type(value) == "string" then
-			controls.texts[name] = value:sub(1, 500)
+		if (name == "Bio Phrases" or name == "Blink Phrases" or name == "RP Name" or name == "Bio Text") and type(value) == "string" then
+			controls.texts[name] = controls.LimitText(value, 500)
 			for _, view in ipairs(controls.textViews[name] or {}) do
 				view.Text = controls.texts[name]
 			end
+			if hooks.texts[name] then hooks.texts[name](controls.texts[name]) end
 		end
 	end
 	for name, values in pairs(data.lists or {}) do
@@ -8909,34 +9002,56 @@ gui.Destroying:Connect(function() teleportFailure:Disconnect() end)
 
 local function inList(name, other)
 	local username, userId = other.Name:lower(), tostring(other.UserId)
+	local displayName = (other.DisplayName or other.Name):lower()
 	local partial = name == "Targets List" or name == "Friends List"
 	for _, entry in ipairs(listEntries[name] or {}) do
-		-- Parse older saved comma-separated entries as well as individual rows.
-		local text = tostring(entry)
 		if partial then
-			for term in text:gmatch("[^,]+") do
+			for term in tostring(entry):gmatch("[^,]+") do
 				term = term:match("^%s*(.-)%s*$"):lower()
-				if term ~= "" and (term == username or term == userId
-					or (not tonumber(term) and username:find(term, 1, true))) then return true end
+				if term ~= "" and (term == username or term == userId or (not tonumber(term)
+					and (username:find(term, 1, true) or displayName:find(term, 1, true)))) then return true end
 			end
 		else
-			local term = text:match("^%s*(.-)%s*$"):lower()
+			local term = tostring(entry):match("^%s*(.-)%s*$"):lower()
 			if term == username or term == userId then return true end
 		end
 	end
 	return false
 end
 local friendCache = {}
+controls.friendRuntime = {pending = {}, retryAt = {}, checkedAt = {}, inFlight = 0, alive = true}
 local function isFriend(other)
-	if inList("Friends List", other) then return true end
+	if inList("Friends List", other) then return true, true end
 	local cached = friendCache[other.UserId]
-	if cached == nil then
-		local okay, result = pcall(function() return player:IsFriendsWithAsync(other.UserId) end)
-		cached = okay and result == true
-		friendCache[other.UserId] = cached
+	local F, id = controls.friendRuntime, other.UserId
+	if cached ~= nil and (cached == true or not F.checkedAt[id] or os.clock() - F.checkedAt[id] < 60) then return cached, true end
+	if F.alive and not F.pending[id] and F.inFlight < 2 and os.clock() >= (F.retryAt[id] or 0) then
+		F.pending[id] = true; F.inFlight += 1
+		task.spawn(function()
+			local okay, result = pcall(function() return player:IsFriendsWithAsync(id) end)
+			if F.alive and other.Parent == Players then
+				if okay and type(result) == "boolean" then
+					friendCache[id] = result; F.checkedAt[id] = os.clock(); controls.scanRevision += 1
+				else F.retryAt[id] = os.clock() + 15 end
+			end
+			F.pending[id] = nil; F.inFlight -= 1
+		end)
 	end
-	return cached
+	-- Unknown friendship is protected until the asynchronous check finishes.
+	return true, false
 end
+do
+	local removed = Players.PlayerRemoving:Connect(function(other)
+		friendCache[other.UserId] = nil
+		controls.friendRuntime.retryAt[other.UserId] = nil
+		controls.friendRuntime.checkedAt[other.UserId] = nil
+	end)
+	gui.Destroying:Connect(function()
+		controls.friendRuntime.alive = false
+		removed:Disconnect()
+	end)
+end
+
 local espObjects = {}
 local function clearESP(other)
 	local objects = espObjects[other]
@@ -8946,6 +9061,10 @@ local function clearESP(other)
 	espObjects[other] = nil
 end
 local function updateESP()
+	if not controls.toggles.ESP and not controls.toggles["Target ESP"] and not controls.toggles["Friend ESP"] then
+		for other in pairs(espObjects) do clearESP(other) end
+		return
+	end
 	local _, _, ownRoot = characterParts()
 	for _, other in ipairs(Players:GetPlayers()) do
 		if other ~= player then
@@ -8954,7 +9073,10 @@ local function updateESP()
 			local root = character and character:FindFirstChild("HumanoidRootPart")
 			local distance = ownRoot and root and (ownRoot.Position - root.Position).Magnitude or math.huge
 			local target = inList("Targets List", other)
-			local friend = isFriend(other)
+			local friend = inList("Friends List", other) or friendCache[other.UserId] == true
+			if controls.toggles["Friend ESP"] then
+				local protected, known = isFriend(other); friend = known and protected
+			end
 			local visible = character and head and distance <= (controls.sliders["ESP Distance"] or 1000)
 				and (controls.toggles.ESP or (target and controls.toggles["Target ESP"])
 					or (friend and controls.toggles["Friend ESP"]))
@@ -9007,68 +9129,98 @@ task.spawn(function()
 	end
 end)
 
--- Executor-safe combat input: use an equipped Tool through Roblox's documented
--- activation method. This can operate gears the player actually has; the gear's
--- own scripts decide whether an activation produces a hit or any damage.
-local function equippedTool()
-	local character = player.Character
-	if not character then return nil end
-	for _, item in ipairs(character:GetChildren()) do
-		if item:IsA("Tool") and item.Enabled then return item end
-	end
-	return nil
-end
-local GameAdapter = { PlaceId = TARGET_PLACE_ID, Mode = "EquippedTool",
+-- Unarmed combat uses the game's combat service; an inventory Tool is not required.
+-- Changed routes are learned from a normal punch, rather than guessed by name.
+local GameAdapter = {PlaceId = TARGET_PLACE_ID, Mode = "UnarmedCombat",
 	remoteCache = {}, pending = {}, auraPending = setmetatable({}, {__mode = "k"}),
-	ownCalls = setmetatable({}, {__mode = "k"}),
+	ownCalls = setmetatable({}, {__mode = "k"}), jobs = {},
 	auraInFlight = 0, auraEpoch = 0, auraSent = 0, auraFailed = 0,
-	auraCompleted = 0, auraFalseReplies = 0 }
-GameAdapter.AuraRemote = function()
+	auraCompleted = 0, auraFalseReplies = 0, maxInFlight = 4, requestTimeout = 5,
+	nextDispatch = -math.huge, retryAt = 0, failureStreak = 0, roundRobin = 0}
+GameAdapter.KnownAuraRemote = function()
 	if not inTargetExperience then return nil end
-	-- Resolve the verified service path before any legacy name-based lookup.
 	local remote = game:GetService("ReplicatedStorage")
 	for _, name in ipairs({"Packages", "Knit", "Services", "CombatService", "RF", "Hit"}) do
 		remote = remote and remote:FindFirstChild(name)
 		if not remote then return nil end
 	end
-	return remote:IsA("RemoteFunction") and remote or nil
+	return (remote:IsA("RemoteFunction") or remote:IsA("RemoteEvent")) and remote or nil
+end
+GameAdapter.AuraRemote = function()
+	if not inTargetExperience then return nil end
+	local remote = GameAdapter.learnedRemote
+	if remote and remote.Parent and GameAdapter.hitTemplate then return remote end
+	if remote and not remote.Parent then
+		GameAdapter.learnedRemote, GameAdapter.learnedMethod, GameAdapter.hitTemplate = nil, nil, nil
+	end
+	return GameAdapter.KnownAuraRemote()
+end
+GameAdapter.FightingState = function()
+	local foundFalse = false
+	for _, object in ipairs({player, player.Character}) do
+		if object then
+			local okay, value = pcall(function() return object:GetAttribute("Fighting") end)
+			if okay and value == true then return true end
+			if okay and value == false then foundFalse = true end
+		end
+	end
+	if foundFalse then return false end
+	return nil
+end
+GameAdapter.Interval = function()
+	return math.max(0.1, 1 / math.clamp(controls.sliders["Aura APS"] or 5, 1, 10),
+		controls.sliders["Attack Speed"] or 0.2)
 end
 GameAdapter.TargetAllowed = function(other)
 	if other == player or other.Parent ~= Players then return false, "self" end
-	if isFriend(other) then return false, "friends" end
 	if inList("Whitelist", other) then return false, "whitelist" end
 	if inList("Protect List", other) then return false, "protect" end
-	-- AuraKill treats a nonempty target list as an allowlist. The explicit
-	-- Target-Only switch also permits an empty list to block every target.
 	if (controls.toggles["Target-Only Mode"] or #listEntries["Targets List"] > 0)
 		and not inList("Targets List", other) then return false, "targets" end
 	if controls.toggles["Same-Team Protection"] and player.Team ~= nil
 		and other.Team == player.Team then return false, "team" end
+	local friend, known = isFriend(other)
+	if not known then return false, "checking" end
+	if friend then return false, "friends" end
 	return true
 end
 GameAdapter.InRange = function(distance)
 	return controls.toggles["Server-Wide Targeting"]
 		or (distance <= (controls.sliders["Target Scan Range"] or 3000)
-			and (controls.toggles["Remote Strike"]
-				or distance <= (controls.sliders["Adjustable Range"] or 50)))
+			and (controls.toggles["Remote Strike"] or distance <= (controls.sliders["Adjustable Range"] or 8)))
 end
 GameAdapter.Remote = function(names)
 	if not inTargetExperience then return nil end
-	local key = table.concat(names, "/")
+	local key, clock = table.concat(names, "/"), os.clock()
 	local entry = GameAdapter.remoteCache[key]
 	if entry and entry.remote and entry.remote.Parent then return entry.remote end
-	if entry and os.clock() - entry.checked < 3 then return nil end
+	if entry and clock - entry.checked < 3 then return nil end
 	local storage = game:GetService("ReplicatedStorage")
+	-- All feature lookups share one traversal; prioritize the published Remotes folder.
+	local folder = storage:FindFirstChild("Remotes")
 	for _, name in ipairs(names) do
-		for _, remote in ipairs(storage:GetDescendants()) do
-			if remote.Name:lower() == name:lower()
-				and (remote:IsA("RemoteEvent") or remote:IsA("RemoteFunction")) then
-				GameAdapter.remoteCache[key] = {remote = remote, checked = os.clock()}
-				return remote
-			end
+		local remote = folder and folder:FindFirstChild(name)
+		if remote and (remote:IsA("RemoteEvent") or remote:IsA("RemoteFunction")) then
+			GameAdapter.remoteCache[key] = {remote = remote, checked = clock}; return remote
 		end
 	end
-	GameAdapter.remoteCache[key] = {checked = os.clock()}
+	if not GameAdapter.remoteIndex or clock - (GameAdapter.remoteIndexAt or -math.huge) >= 3 then
+		local index = {}
+		for _, remote in ipairs(storage:GetDescendants()) do
+			if remote:IsA("RemoteEvent") or remote:IsA("RemoteFunction") then
+				local name = remote.Name:lower()
+				if index[name] == nil then index[name] = remote else index[name] = false end
+			end
+		end
+		GameAdapter.remoteIndex, GameAdapter.remoteIndexAt = index, clock
+	end
+	for _, name in ipairs(names) do
+		local remote = GameAdapter.remoteIndex[name:lower()]
+		if remote and remote.Parent then
+			GameAdapter.remoteCache[key] = {remote = remote, checked = clock}; return remote
+		end
+	end
+	GameAdapter.remoteCache[key] = {checked = clock}
 	return nil
 end
 GameAdapter.CallRemote = function(remote, ...)
@@ -9085,8 +9237,6 @@ GameAdapter.CallRemote = function(remote, ...)
 	end)
 	return true
 end
--- Learn only the public CombatService.Hit call actually used by this client.
--- Observation forwards the original call unchanged and never edits game state.
 do
 	local function targetArgument(value)
 		if typeof(value) ~= "Instance" then return nil end
@@ -9106,69 +9256,139 @@ do
 			end
 		end
 	end
-	GameAdapter.CaptureHit = function(args)
-		if not inTargetExperience or not gui.Parent or type(args.n) ~= "number" or args.n > 16 then return false end
+	GameAdapter.IsCombatRemote = function(remote, method)
+		if typeof(remote) ~= "Instance" or not remote.Parent then return false end
+		if method ~= "InvokeServer" and method ~= "FireServer" then return false end
+		if method == "InvokeServer" and not remote:IsA("RemoteFunction") then return false end
+		if method == "FireServer" and not remote:IsA("RemoteEvent") then return false end
+		local name = remote.Name:lower()
+		local recognized = name == "hit" or name == "punch" or name == "punchdo"
+			or name == "attack" or name == "m1" or name == "strike"
+		if remote ~= GameAdapter.learnedRemote and not recognized then return false end
+		if remote == GameAdapter.KnownAuraRemote() or remote == GameAdapter.learnedRemote then return true end
+		if os.clock() > (GameAdapter.learnUntil or -math.huge) then return false end
+		if not remote:IsDescendantOf(game:GetService("ReplicatedStorage")) then return false end
+		return recognized
+	end
+	GameAdapter.CaptureHit = function(args, remote, method)
+		if not inTargetExperience or not gui.Parent or type(args.n) ~= "number"
+			or args.n ~= args.n or args.n % 1 ~= 0 or args.n < 1 or args.n > 16 then return false end
 		local target, template = nil, {n = args.n, entries = {}}
-		for i = 1, args.n do
-			local other, descriptor = targetArgument(args[i])
+		local count, seen = 0, {}
+		local function collect(value, depth)
+			count += 1
+			if depth > 3 or count > 64 then return false end
+			local other = targetArgument(value)
 			if other then
 				if target and target ~= other then return false end
-				target = other; template.entries[i] = descriptor
+				target = other
+			elseif type(value) == "table" and typeof(value) == "table" then
+				if seen[value] then return false end
+				seen[value] = true
+				local nonempty = false
+				for key, nested in pairs(value) do
+					if type(key) ~= "string" and type(key) ~= "number" then return false end
+					if not collect(nested, depth + 1) then return false end
+					nonempty = true
+				end
+				if not nonempty then return false end
 			end
+			return true
 		end
+		for i = 1, args.n do if not collect(args[i], 0) then return false end end
 		local character = target and target.Character
 		local targetRoot = character and character:FindFirstChild("HumanoidRootPart")
 		local ownCharacter = player.Character
 		local ownRoot = ownCharacter and ownCharacter:FindFirstChild("HumanoidRootPart")
 		if not targetRoot or not ownRoot then return false end
-		for i = 1, args.n do
-			if not template.entries[i] then
-				local value, kind = args[i], typeof(args[i])
-				if kind == "Vector3" or kind == "vector" then
-					local point = kind == "vector" and Vector3.new(value.X, value.Y, value.Z) or value
-					local originDistance = (point - ownRoot.Position).Magnitude
-					local targetDistance = (point - targetRoot.Position).Magnitude
-					if originDistance <= 8 and originDistance <= targetDistance then
-						template.entries[i] = {kind = "origin", offset = point - ownRoot.Position, vectorKind = kind}
-					elseif targetDistance <= 12 then
-						template.entries[i] = {kind = "targetPosition",
-							offset = targetRoot.CFrame:PointToObjectSpace(point), vectorKind = kind}
-					else return false end -- Do not replay an unexplained world coordinate.
-				elseif value == nil or type(value) == "string" or type(value) == "number" or type(value) == "boolean" then
-					template.entries[i] = {kind = "literal", value = value}
-				else return false end -- Unknown tables/instances may contain live state.
+		local function describe(value)
+			local _, descriptor = targetArgument(value)
+			if descriptor then return descriptor end
+			local kind = typeof(value)
+			if kind == "Instance" then
+				if value == player then return {kind = "ownPlayer"} end
+				if value == ownCharacter then return {kind = "ownCharacter"} end
+				if value:IsA("Humanoid") and value.Parent == ownCharacter then return {kind = "ownHumanoid"} end
+				if value:IsA("BasePart") and value:IsDescendantOf(ownCharacter) then
+					local path, current = {}, value
+					while current and current ~= ownCharacter do table.insert(path, 1, current.Name); current = current.Parent end
+					return {kind = "ownPart", path = path}
+				end
+			elseif kind == "Vector3" or kind == "vector" or kind == "CFrame" then
+				local point = kind == "CFrame" and value.Position
+					or (kind == "vector" and Vector3.new(value.X, value.Y, value.Z) or value)
+				local originDistance = (point - ownRoot.Position).Magnitude
+				local targetDistance = (point - targetRoot.Position).Magnitude
+				local origin = originDistance <= 8 and originDistance <= targetDistance
+				if not origin and targetDistance > 12 then return nil end
+				if kind == "CFrame" then
+					return {kind = origin and "originCFrame" or "targetCFrame",
+						offset = (origin and ownRoot.CFrame or targetRoot.CFrame):ToObjectSpace(value)}
+				end
+				return {kind = origin and "origin" or "targetPosition", vectorKind = kind,
+					offset = (origin and ownRoot.CFrame or targetRoot.CFrame):PointToObjectSpace(point)}
+			elseif kind == "table" then
+				local entries = {}
+				for key, nested in pairs(value) do
+					local entry = describe(nested)
+					if not entry then return nil end
+					entries[key] = entry
+				end
+				return {kind = "table", entries = entries}
+			elseif value == nil or type(value) == "string" or type(value) == "number" or type(value) == "boolean" then
+				if type(value) == "string" and #value > 256 then return nil end
+				if type(value) == "number" and (value ~= value or math.abs(value) == math.huge) then return nil end
+				return {kind = "literal", value = value}
 			end
 		end
+		for i = 1, args.n do
+			local entry = describe(args[i])
+			if not entry then return false end
+			template.entries[i] = entry
+		end
 		GameAdapter.hitTemplate = template
+		if remote then GameAdapter.learnedRemote, GameAdapter.learnedMethod = remote, method end
 		GameAdapter.observedCalls = (GameAdapter.observedCalls or 0) + 1
+		GameAdapter.retryAt, GameAdapter.failureStreak = 0, 0
 		return true
 	end
 	GameAdapter.BuildAuraArguments = function(other, humanoid, root, ownRoot)
 		local mode = math.clamp(math.floor(controls.sliders["Hit Position Mode"] or 4), 1, 4)
 		local template = mode == 4 and GameAdapter.hitTemplate
 		if template then
-			local args, valid = {n = template.n}, true
-			for i = 1, template.n do
-				local entry = template.entries[i]
-				if entry.kind == "humanoid" then args[i] = humanoid
-				elseif entry.kind == "player" then args[i] = other
-				elseif entry.kind == "character" then args[i] = other.Character
-				elseif entry.kind == "part" then
-					local part = other.Character
-					for _, name in ipairs(entry.path) do part = part and part:FindFirstChild(name) end
-					if not part or not part:IsA("BasePart") then valid = false; break end
-					args[i] = part
-				elseif entry.kind == "origin" then args[i] = ownRoot.Position + entry.offset
-				elseif entry.kind == "targetPosition" then args[i] = root.CFrame:PointToWorldSpace(entry.offset)
-				elseif entry.kind == "literal" then args[i] = entry.value
-				else valid = false; break end
+			local valid = true
+			local function rebuild(entry)
+				local value
+				if entry.kind == "humanoid" then value = humanoid
+				elseif entry.kind == "player" then value = other
+				elseif entry.kind == "character" then value = other.Character
+				elseif entry.kind == "ownPlayer" then value = player
+				elseif entry.kind == "ownCharacter" then value = player.Character
+				elseif entry.kind == "ownHumanoid" then value = player.Character:FindFirstChildOfClass("Humanoid")
+				elseif entry.kind == "part" or entry.kind == "ownPart" then
+					value = entry.kind == "ownPart" and player.Character or other.Character
+					for _, name in ipairs(entry.path) do value = value and value:FindFirstChild(name) end
+					if not value or not value:IsA("BasePart") then valid = false end
+				elseif entry.kind == "origin" then value = ownRoot.CFrame:PointToWorldSpace(entry.offset)
+				elseif entry.kind == "targetPosition" then value = root.CFrame:PointToWorldSpace(entry.offset)
+				elseif entry.kind == "originCFrame" then value = ownRoot.CFrame * entry.offset
+				elseif entry.kind == "targetCFrame" then value = root.CFrame * entry.offset
+				elseif entry.kind == "literal" then value = entry.value
+				elseif entry.kind == "table" then
+					value = {}; for key, nested in pairs(entry.entries) do value[key] = rebuild(nested) end
+				else valid = false end
 				if entry.vectorKind == "vector" then
-					if type(vector) ~= "table" or type(vector.create) ~= "function" then valid = false; break end
-					args[i] = vector.create(args[i].X, args[i].Y, args[i].Z)
+					if type(vector) ~= "table" or type(vector.create) ~= "function" then valid = false
+					else value = vector.create(value.X, value.Y, value.Z) end
 				end
+				return value
 			end
+			local args = {n = template.n}
+			for i = 1, template.n do args[i] = rebuild(template.entries[i]) end
 			if valid then GameAdapter.hitProfile = "observed"; return args end
+			return nil -- Never substitute guessed arguments for a changed learned route.
 		end
+		if GameAdapter.learnedRemote and GameAdapter.learnedRemote ~= GameAdapter.KnownAuraRemote() then return nil end
 		local position = ownRoot.Position
 		GameAdapter.hitProfile = "origin"
 		if mode == 2 then position = root.Position; GameAdapter.hitProfile = "target"
@@ -9176,51 +9396,57 @@ do
 		if (mode == 1 or mode == 4) and type(vector) == "table" and type(vector.create) == "function" then
 			position = vector.create(position.X, position.Y, position.Z)
 		end
-		-- The readable publisher versions and MinuHub use the local origin.
 		return table.pack(humanoid, position)
 	end
-	local env = executorGlobal()
-	local key = "ARG_CORE_V7_COMBAT_OBSERVER"
+	local env, key = executorGlobal(), "ARG_CORE_V7_COMBAT_OBSERVER"
 	local observer = rawget(env, key)
-	if type(observer) == "table" and observer.installed and observer.version == 1 then
-		observer.owner = GameAdapter
+	local function dispatch(owner, remote, method, args)
+		if not owner.IsCombatRemote(remote, method) then return end
+		if owner.CaptureHit(args, remote, method) and owner.learnUntil then
+			owner.learnUntil = nil
+			notify("Unarmed punch learned; use AUTO Hit Arguments")
+		end
+	end
+	if type(observer) == "table" and observer.installed and observer.version == 2 then
+		observer.owner, observer.dispatch = GameAdapter, dispatch
 		GameAdapter.observerAvailable = true
 	elseif type(hookmetamethod) == "function" and type(getnamecallmethod) == "function" then
-		observer = {version = 1, owner = GameAdapter}
+		-- Disable the old observer when upgrading; install only once for this version.
+		if type(observer) == "table" then observer.owner = nil end
+		observer = {version = 2, owner = GameAdapter, dispatch = dispatch}
 		local previous
 		local function observe(remote, ...)
-			local method = getnamecallmethod()
-			local owner = observer.owner
-			if owner and method == "InvokeServer" and not owner.ownCalls[coroutine.running() or owner] then
+			local method, owner = getnamecallmethod(), observer.owner
+			if owner and (method == "InvokeServer" or method == "FireServer")
+				and not owner.ownCalls[coroutine.running() or owner] then
 				local args = table.pack(...)
 				pcall(function()
 					if type(checkcaller) == "function" and checkcaller() then return end
-					if remote == owner.AuraRemote() then owner.CaptureHit(args) end
+					observer.dispatch(owner, remote, method, args)
 				end)
 			end
-			-- Nested Instance lookups in capture can change executor namecall state.
 			if type(setnamecallmethod) == "function" then setnamecallmethod(method) end
 			return previous(remote, ...)
 		end
 		local okay, original = pcall(function()
-			local wrapper = type(newcclosure) == "function" and newcclosure(observe) or observe
-			return hookmetamethod(game, "__namecall", wrapper)
+			return hookmetamethod(game, "__namecall", type(newcclosure) == "function" and newcclosure(observe) or observe)
 		end)
 		if okay and type(original) == "function" then
-			previous = original
-			observer.installed = true; env[key] = observer
+			previous = original; observer.installed = true; env[key] = observer
 			GameAdapter.observerAvailable = true
 		else
-			observer.owner = nil
-			GameAdapter.observerAvailable = false
+			observer.owner = nil; GameAdapter.observerAvailable = false
 			GameAdapter.observerError = tostring(original):sub(1, 160)
 		end
-	else
-		GameAdapter.observerAvailable = false
-	end
+	else GameAdapter.observerAvailable = false end
 	gui.Destroying:Connect(function()
 		if type(observer) == "table" and observer.owner == GameAdapter then observer.owner = nil end
 	end)
+end
+GameAdapter.OldestRequest = function()
+	local age = 0
+	for _, token in pairs(GameAdapter.jobs) do age = math.max(age, os.clock() - token.started) end
+	return age
 end
 GameAdapter.CallAura = function(remote, candidate)
 	local other = candidate.player
@@ -9229,167 +9455,118 @@ GameAdapter.CallAura = function(remote, candidate)
 	local root = character and character:FindFirstChild("HumanoidRootPart")
 	local ownCharacter = player.Character
 	local ownRoot = ownCharacter and ownCharacter:FindFirstChild("HumanoidRootPart")
-	if not gui.Parent or not controls.toggles["Omega Aura"] or not remote.Parent
-		or not ownRoot or not root or not humanoid or humanoid.Health <= 0
-		or GameAdapter.auraPending[humanoid] or GameAdapter.auraInFlight >= 100 then return false end
-	if not GameAdapter.TargetAllowed(other)
-		or not GameAdapter.InRange((ownRoot.Position - root.Position).Magnitude) then return false end
-	local epoch = GameAdapter.auraEpoch
-	local token = {}
-	GameAdapter.auraPending[humanoid] = token
+	local ownHumanoid = ownCharacter and ownCharacter:FindFirstChildOfClass("Humanoid")
+	local clock = os.clock()
+	if not gui.Parent or not controls.toggles["Omega Aura"] or not remote or not remote.Parent
+		or not ownRoot or not ownHumanoid or ownHumanoid.Health <= 0 or not root or not humanoid or humanoid.Health <= 0
+		or GameAdapter.FightingState() == false or GameAdapter.auraPending[humanoid]
+		or GameAdapter.auraInFlight >= GameAdapter.maxInFlight
+		or clock < GameAdapter.nextDispatch or clock < GameAdapter.retryAt
+		or GameAdapter.OldestRequest() >= GameAdapter.requestTimeout then return false end
+	if not GameAdapter.TargetAllowed(other) or not GameAdapter.InRange((ownRoot.Position - root.Position).Magnitude) then return false end
+	local epoch, token = GameAdapter.auraEpoch, {started = clock, humanoid = humanoid}
+	GameAdapter.auraPending[humanoid] = token; GameAdapter.jobs[token] = token
 	GameAdapter.auraInFlight += 1
-	task.spawn(function()
+	GameAdapter.nextDispatch = clock + GameAdapter.Interval()
+	token.thread = task.spawn(function()
 		local thread = coroutine.running() or GameAdapter
 		local okay, err = pcall(function()
-			-- Skip queued work if the UI stopped, either character changed, or
-			-- a protection/list setting changed before dispatch.
-			if not gui.Parent or not controls.toggles["Omega Aura"]
-				or epoch ~= GameAdapter.auraEpoch or player.Character ~= ownCharacter
-				or other.Character ~= character or not remote.Parent
-				or humanoid.Parent ~= character or root.Parent ~= character
-				or ownRoot.Parent ~= ownCharacter or humanoid.Health <= 0 then return end
-			if not GameAdapter.TargetAllowed(other)
-				or not GameAdapter.InRange((ownRoot.Position - root.Position).Magnitude) then return end
+			if not gui.Parent or not controls.toggles["Omega Aura"] or epoch ~= GameAdapter.auraEpoch
+				or player.Character ~= ownCharacter or other.Character ~= character or not remote.Parent
+				or humanoid.Parent ~= character or root.Parent ~= character or ownRoot.Parent ~= ownCharacter
+				or humanoid.Health <= 0 or ownHumanoid.Health <= 0 or GameAdapter.FightingState() == false then return end
+			if not GameAdapter.TargetAllowed(other) or not GameAdapter.InRange((ownRoot.Position - root.Position).Magnitude) then return end
 			local args = GameAdapter.BuildAuraArguments(other, humanoid, root, ownRoot)
-			GameAdapter.ownCalls[thread] = true
-			GameAdapter.auraSent += 1
-			local reply = remote:InvokeServer(table.unpack(args, 1, args.n))
+			if not args then GameAdapter.lastCombatError = "Punch schema changed; click Learn Punch"; return end
+			GameAdapter.ownCalls[thread] = true; GameAdapter.auraSent += 1
+			local reply
+			if remote:IsA("RemoteEvent") then remote:FireServer(table.unpack(args, 1, args.n))
+			else reply = remote:InvokeServer(table.unpack(args, 1, args.n)) end
 			GameAdapter.auraCompleted += 1
-			if reply == false then GameAdapter.auraFalseReplies += 1 end
-			if reply == nil then GameAdapter.lastCombatReply = "nil"
-			elseif type(reply) == "boolean" or type(reply) == "number" then
-				GameAdapter.lastCombatReply = tostring(reply)
-			else GameAdapter.lastCombatReply = typeof(reply) end
+			GameAdapter.lastRequestSeconds = os.clock() - token.started
+			if reply == false then
+				GameAdapter.auraFalseReplies += 1; GameAdapter.failureStreak += 1
+				GameAdapter.retryAt = os.clock() + math.min(8, 0.5 * 2 ^ math.min(GameAdapter.failureStreak - 1, 4))
+			else GameAdapter.failureStreak = 0 end
+			GameAdapter.lastCombatReply = reply == nil and "nil"
+				or ((type(reply) == "boolean" or type(reply) == "number") and tostring(reply) or typeof(reply))
 		end)
 		GameAdapter.ownCalls[thread] = nil
 		if not okay then
-			GameAdapter.auraFailed += 1
+			GameAdapter.auraFailed += 1; GameAdapter.failureStreak += 1
 			GameAdapter.lastCombatError = tostring(err):sub(1, 120)
+			GameAdapter.retryAt = os.clock() + math.min(8, 0.5 * 2 ^ math.min(GameAdapter.failureStreak - 1, 4))
 		end
 		if GameAdapter.auraPending[humanoid] == token then GameAdapter.auraPending[humanoid] = nil end
-		GameAdapter.auraInFlight -= 1
+		GameAdapter.jobs[token] = nil; GameAdapter.auraInFlight = math.max(0, GameAdapter.auraInFlight - 1)
 	end)
 	return true
 end
 GameAdapter.Attack = function(candidates, limit)
-	local ownCharacter = player.Character
-	local ownRoot = ownCharacter and ownCharacter:FindFirstChild("HumanoidRootPart")
-	if not ownRoot then return false end
-	limit = math.clamp(math.floor(limit), 1, 100)
-	local auraRemote = GameAdapter.AuraRemote()
-	if auraRemote then
-		GameAdapter.Mode = "AuraKill"
-		local sent, first = 0, nil
-		for _, candidate in ipairs(candidates) do
-			if GameAdapter.CallAura(auraRemote, candidate) then
-				sent += 1
-				first = first or candidate.player
-				if sent >= limit then break end
-			end
+	local remote = GameAdapter.AuraRemote()
+	if not remote or #candidates == 0 then return false end
+	GameAdapter.Mode = GameAdapter.learnedRemote == remote and "ObservedUnarmedPunch" or "CombatServiceHit"
+	limit = math.min(#candidates, math.clamp(math.floor(limit), 1, 100))
+	-- One aggregate rate applies to all targets. Rotate eligible targets across cycles.
+	local start = controls.toggles["Multi-Target Mode"] and (GameAdapter.roundRobin % limit + 1) or 1
+	for offset = 0, limit - 1 do
+		local index = (start + offset - 1) % limit + 1
+		local candidate = candidates[index]
+		if GameAdapter.CallAura(remote, candidate) then
+			GameAdapter.roundRobin = index
+			return true, candidate.player, candidate.player.Character
 		end
-		-- Pending requests wait for completion instead of also activating a
-		-- Tool. Each target gets at most one unresolved call at a time.
-		return sent > 0, first, first and first.Character
 	end
-	-- MinuHub's published adapter passes a target Humanoid and origin to a
-	-- named Hit/Punch remote. A response is input only; server damage is not
-	-- inferred from a successful FireServer/InvokeServer call.
-	local hitRemote = GameAdapter.Remote({"Hit", "Punch"})
-	if hitRemote then
-		local origin = ownRoot.Position
-		if type(vector) == "table" and type(vector.create) == "function" then
-			origin = vector.create(origin.X, origin.Y, origin.Z)
-		end
-		local sent, first = 0, nil
-		for _, candidate in ipairs(candidates) do
-			local otherCharacter = candidate.player.Character
-			local humanoid = otherCharacter and otherCharacter:FindFirstChildOfClass("Humanoid")
-			if humanoid and humanoid.Health > 0
-				and GameAdapter.CallRemote(hitRemote, humanoid, origin) then
-				sent += 1
-				first = first or candidate.player
-				if sent >= math.min(limit, 8) then break end
-			end
-		end
-		if sent > 0 then GameAdapter.Mode = "GameRemote"; return true, first, first.Character end
-	end
-	if controls.toggles["Remote Strike"] then return false end
-	local tool = equippedTool()
-	local first = candidates[1]
-	local character = first and first.player.Character
-	local targetRoot = character and character:FindFirstChild("HumanoidRootPart")
-	if not tool or not targetRoot then return false end
-	local okay = pcall(function() tool:Activate() end)
-	if okay then
-		-- Some equipped melee gears use Handle.Touched. Simulate only close
-		-- contacts when this executor exposes firetouchinterest; the game's
-		-- server still decides whether those contacts count as a hit.
-		local handle = tool:FindFirstChild("Handle")
-		if handle and handle:IsA("BasePart") and type(firetouchinterest) == "function" then
-			local contacted = 0
-			for _, candidate in ipairs(candidates) do
-				local otherCharacter = candidate.player.Character
-				local otherRoot = otherCharacter
-					and otherCharacter:FindFirstChild("HumanoidRootPart")
-				if otherRoot and candidate.distance <= 18 then
-					pcall(firetouchinterest, handle, otherRoot, 0)
-					pcall(firetouchinterest, handle, otherRoot, 1)
-					contacted += 1
-					if contacted >= math.min(limit, 8) then break end
-				end
-			end
-		end
-		task.delay(0.08, function()
-			if tool.Parent == player.Character then pcall(function() tool:Deactivate() end) end
-		end)
-	end
-	if okay then GameAdapter.Mode = "EquippedTool" end
-	return okay, first and first.player, character
+	return false
 end
 runtimeGuards["Remote Strike"] = function()
 	if not inTargetExperience then return "Remote Strike is configured for Highschool Experience RP" end
-	if not GameAdapter.AuraRemote() and not GameAdapter.Remote({"Hit", "Punch"}) then
-		return "The game has not exposed a combat Hit/Punch remote"
-	end
+	if not GameAdapter.AuraRemote() then return "Enter the fight area, click Learn Punch, and punch normally" end
 end
-runtimeGuards["Omega Aura"] = function()
-	if not inTargetExperience then return "Omega Aura is configured for Highschool Experience RP" end
-	if not GameAdapter.AuraRemote() and not GameAdapter.Remote({"Hit", "Punch"}) and not equippedTool() then
-		return "Combat Hit/Punch is unavailable; equip a supported melee gear"
-	end
-end
+runtimeGuards["Omega Aura"] = runtimeGuards["Remote Strike"]
 runtimeGuards["Kill Aura"] = runtimeGuards["Omega Aura"]
 hooks.toggles["Omega Aura"] = function(enabled)
-	GameAdapter.auraEpoch += 1
+	GameAdapter.auraEpoch += 1; GameAdapter.roundRobin = 0
 	if controls.toggles["Kill Aura"] ~= enabled then setToggle("Kill Aura", enabled) end
-	if enabled then
-		notify(GameAdapter.AuraRemote()
-			and "Combat Hit connected; Attack Speed and Aura APS control request timing"
-			or "Aura input enabled using the existing Hit/Punch or equipped gear adapter")
-	end
+	if enabled then notify("Unarmed combat enabled; enter the fight area and use Learn Punch if hits are rejected") end
 end
 hooks.toggles["Kill Aura"] = function(enabled)
 	if controls.toggles["Omega Aura"] ~= enabled then setToggle("Omega Aura", enabled) end
 end
+actionHandlers["Learn Punch"] = function()
+	if not inTargetExperience then notify("Open Highschool Experience RP first"); return end
+	if not GameAdapter.observerAvailable then notify("This executor cannot observe normal punch calls"); return end
+	setToggle("Omega Aura", false)
+	setSlider("Hit Position Mode", 4)
+	GameAdapter.learnUntil = os.clock() + 30
+	notify("For 30 seconds: enter the fight area and land one normal punch near a player, then enable Omega Aura")
+end
 GameAdapter.Status = function()
 	if not inTargetExperience then return "AURA: TARGET GAME MISMATCH" end
-	if GameAdapter.AuraRemote() then
-		if not controls.toggles["Omega Aura"] then return "AURA: READY / COMBAT HIT CONNECTED" end
-		if GameAdapter.auraFalseReplies > 0 then
-			return string.format("AURA: %d REQUESTS / %d FALSE REPLIES / %d FAILED",
-				GameAdapter.auraSent, GameAdapter.auraFalseReplies, GameAdapter.auraFailed)
-		end
-		return string.format("AURA: %d REQUESTS / %d WAITING / %d FAILED",
-			GameAdapter.auraSent, GameAdapter.auraInFlight, GameAdapter.auraFailed)
+	if GameAdapter.learnUntil and os.clock() <= GameAdapter.learnUntil then return "AURA: LEARNING / LAND A NORMAL PUNCH" end
+	if GameAdapter.FightingState() == false then return "AURA: ENTER THE FIGHT AREA" end
+	if not GameAdapter.AuraRemote() then return "AURA: CLICK LEARN PUNCH" end
+	if GameAdapter.OldestRequest() >= GameAdapter.requestTimeout then return "AURA: PAUSED / SERVER REPLY TIMED OUT" end
+	if os.clock() < GameAdapter.retryAt then
+		return string.format("AURA: BACKOFF / %d FALSE REPLIES / %d FAILED", GameAdapter.auraFalseReplies, GameAdapter.auraFailed)
 	end
-	if GameAdapter.Remote({"Hit", "Punch"}) then
-		return controls.toggles["Omega Aura"] and "AURA: LEGACY COMBAT INPUT ACTIVE"
-			or "AURA: READY / LEGACY COMBAT CONNECTED"
-	end
-	if controls.toggles["Remote Strike"] then return "AURA: COMBAT REMOTE UNAVAILABLE" end
-	if not equippedTool() then return "AURA: EQUIP A GEAR" end
-	return controls.toggles["Omega Aura"] and "AURA: EQUIPPED GEAR INPUT ACTIVE" or "AURA: STANDBY"
+	if not controls.toggles["Omega Aura"] then return "AURA: READY / UNARMED COMBAT" end
+	return string.format("AURA: %d REQUESTS / %d WAITING / %d FAILED", GameAdapter.auraSent, GameAdapter.auraInFlight, GameAdapter.auraFailed)
 end
+gui.Destroying:Connect(function()
+	GameAdapter.auraEpoch += 1
+	if type(task.cancel) == "function" then
+		for _, token in pairs(GameAdapter.jobs) do
+			if token.thread and pcall(task.cancel, token.thread) then
+				GameAdapter.ownCalls[token.thread] = nil
+				if GameAdapter.auraPending[token.humanoid] == token then GameAdapter.auraPending[token.humanoid] = nil end
+				GameAdapter.jobs[token] = nil
+				GameAdapter.auraInFlight = math.max(0, GameAdapter.auraInFlight - 1)
+			end
+		end
+	end
+end)
+
 -- User-invoked diagnostic output stays in the executor clipboard or a local file.
 -- Successful requests are input counts, never proof of server damage.
 do
@@ -9421,7 +9598,7 @@ do
 			if okay then state = tostring(value) end
 		end
 		return {
-			revision = "ARG CORE V7 / source audit 2026-09-30", placeId = game.PlaceId,
+			revision = "ARG CORE V7 / executor repair 2026-09-30", placeId = game.PlaceId,
 			universeId = game.GameId, expectedPlaceId = TARGET_PLACE_ID, correctGame = inTargetExperience,
 			capabilities = {getconnections = type(getconnections) == "function",
 				hookmetamethod = type(hookmetamethod) == "function",
@@ -9429,8 +9606,8 @@ do
 				checkcaller = type(checkcaller) == "function", firetouchinterest = type(firetouchinterest) == "function",
 				clipboard = type(setclipboard or toclipboard or setrbxclipboard or env.setclipboard) == "function",
 				writefile = type(writefile) == "function"},
-			combat = {exactRemote = remote ~= nil, remotePath = remotePath,
-				legacyRemote = GameAdapter.Remote({"Hit", "Punch"}) ~= nil, equippedTool = equippedTool() ~= nil,
+			combat = {exactRemote = GameAdapter.KnownAuraRemote() ~= nil, remotePath = remotePath,
+				learnedRoute = GameAdapter.learnedRemote ~= nil, fighting = GameAdapter.FightingState(),
 				mode = GameAdapter.Mode, hitArguments = GameAdapter.hitProfile or "origin",
 				positionMode = controls.sliders["Hit Position Mode"] or 4,
 				observerAvailable = GameAdapter.observerAvailable, observedCalls = GameAdapter.observedCalls or 0,
@@ -9439,7 +9616,15 @@ do
 				failed = GameAdapter.auraFailed, falseReplies = GameAdapter.auraFalseReplies,
 				lastError = GameAdapter.lastCombatError, lastReplyTypeOrBoolean = GameAdapter.lastCombatReply,
 				attackInterval = controls.sliders["Attack Speed"], auraAPS = controls.sliders["Aura APS"],
-				range = controls.sliders["Adjustable Range"]},
+				range = controls.sliders["Adjustable Range"], maxPending = GameAdapter.maxInFlight,
+				oldestPendingSeconds = GameAdapter.OldestRequest(), lastRequestSeconds = GameAdapter.lastRequestSeconds,
+				backoffSeconds = math.max(0, GameAdapter.retryAt - os.clock()), effectiveInterval = GameAdapter.Interval()},
+			rp = {requests = controls.rpRuntime and controls.rpRuntime.sent or 0,
+				completed = controls.rpRuntime and controls.rpRuntime.completed or 0,
+				failed = controls.rpRuntime and controls.rpRuntime.failed or 0,
+				lastError = controls.rpRuntime and controls.rpRuntime.lastError},
+			performance = {fps = controls.fps, targetScans = GameAdapter.scanCount or 0,
+				lastScanSeconds = GameAdapter.lastScanSeconds, characterCacheRebuilds = controls.characterCache.rebuilds},
 			protection = {eventListenersDisabled = P.eventsDisabled or 0, carryLinksDisabled = P.carryLinks or 0,
 				motorsRecovered = P.recoveredMotors or 0, constraintsDisabled = P.ragdollConstraints or 0,
 				lastEvent = P.lastEvent, lastError = P.lastError},
@@ -9484,38 +9669,58 @@ do
 	end)
 	gui.Destroying:Connect(function() respawnConnection:Disconnect() end)
 end
-local function scanTargets()
-	local _, _, root = characterParts()
-	local stats = {found = 0, ignored = 0, valid = 0,
-		friends = 0, whitelist = 0, protect = 0}
-	if not root then return {}, stats end
-	local result = {}
-	for _, other in ipairs(Players:GetPlayers()) do
-		if other ~= player then
-			local character = other.Character
-			local otherRoot = character and character:FindFirstChild("HumanoidRootPart")
-			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-			if otherRoot and humanoid and humanoid.Health > 0 then
-				stats.found += 1
-				local allowed, reason = GameAdapter.TargetAllowed(other)
-				if not allowed then
-					stats.ignored += 1
-					if stats[reason] ~= nil then stats[reason] += 1 end
-				else
-					local distance = (root.Position - otherRoot.Position).Magnitude
-					if GameAdapter.InRange(distance) then
-						table.insert(result, {player = other, distance = distance})
-					end
+local scanTargets
+do
+	local function selectCached(cache, rangeOverride)
+		local result, stats = {}, table.clone(cache.stats)
+		for _, candidate in ipairs(cache.result) do
+			local distance = candidate.distance
+			local inRange
+			if rangeOverride then
+				inRange = distance <= rangeOverride and (controls.toggles["Server-Wide Targeting"]
+					or distance <= (controls.sliders["Target Scan Range"] or 3000))
+			else inRange = GameAdapter.InRange(distance) end
+			if inRange then table.insert(result, candidate) end
+		end
+		if controls.toggles["Priority Targeting"] then
+			table.sort(result, function(a, b) return a.distance < b.distance end)
+		end
+		stats.valid = #result
+		return result, stats
+	end
+	scanTargets = function(force, rangeOverride)
+		local clock = os.clock()
+		local cache = GameAdapter.scanCache
+		if not force and cache and clock - cache.at < 0.1 and cache.revision == controls.scanRevision
+			and cache.character == player.Character then return selectCached(cache, rangeOverride) end
+		GameAdapter.scanCount = (GameAdapter.scanCount or 0) + 1
+		local _, _, root = characterParts()
+		local stats = {found = 0, ignored = 0, valid = 0,
+			friends = 0, whitelist = 0, protect = 0, checking = 0}
+		if not root then return {}, stats end
+		local result = {}
+		for _, other in ipairs(Players:GetPlayers()) do
+			if other ~= player then
+				local character = other.Character
+				local otherRoot = character and character:FindFirstChild("HumanoidRootPart")
+				local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+				if otherRoot and humanoid and humanoid.Health > 0 then
+					stats.found += 1
+					local allowed, reason = GameAdapter.TargetAllowed(other)
+					if not allowed then
+						stats.ignored += 1
+						if stats[reason] ~= nil then stats[reason] += 1 end
+					else table.insert(result, {player = other, distance = (root.Position - otherRoot.Position).Magnitude}) end
 				end
 			end
 		end
+		cache = {at = clock, character = player.Character, revision = controls.scanRevision, result = result, stats = stats}
+		GameAdapter.scanCache = cache
+		GameAdapter.lastScanSeconds = os.clock() - clock
+		return selectCached(cache, rangeOverride)
 	end
-	if controls.toggles["Priority Targeting"] then
-		table.sort(result, function(a, b) return a.distance < b.distance end)
-	end
-	stats.valid = #result
-	return result, stats
 end
+
 -- Local target hitbox adjustment, derived from the public universal pattern
 -- but with exact original values restored on disable, target removal, or close.
 do
@@ -9539,13 +9744,13 @@ end
 local function refreshHitboxes()
 	local selected = {}
 	if controls.toggles["Hitbox Changer"] and inTargetExperience then
-		local candidates = scanTargets()
 		local size = controls.sliders["Hitbox Size"] or 8
 		local range = controls.sliders["Hitbox Range"] or 80
+		local candidates = scanTargets(false, range)
 		for _, candidate in ipairs(candidates) do
 			local character = candidate.player.Character
 			local root = character and character:FindFirstChild("HumanoidRootPart")
-			if root and candidate.distance <= range then
+			if root and GameAdapter.TargetAllowed(candidate.player) and candidate.distance <= range then
 				selected[root] = true
 				if not originalHitboxes[root] then
 					originalHitboxes[root] = {
@@ -9635,9 +9840,9 @@ do
 			if controls.toggles["Spam Grab"] then
 				local remote = GameAdapter.Remote({"Grab"})
 				if remote then
-					local candidates = scanTargets()
+					local candidates = scanTargets(false, controls.sliders["Grab Range"] or 18)
 					for _, candidate in ipairs(candidates) do
-						if candidate.distance <= (controls.sliders["Grab Range"] or 18) then
+						if GameAdapter.TargetAllowed(candidate.player) and candidate.distance <= (controls.sliders["Grab Range"] or 18) then
 							GameAdapter.CallRemote(remote, candidate.player)
 							break
 						end
@@ -9648,135 +9853,285 @@ do
 		end
 	end)
 end
--- RP name and bio effects from the public MinuHub feature set. These operate
--- only when the target experience exposes the named remotes.
+-- A single scheduler owns RP text/color updates. Pending RemoteFunctions keep
+-- only the latest requested value, and every text prefix ends on a UTF-8 boundary.
 do
-	local palettes = {
-		{Color3.fromRGB(255, 0, 0), Color3.fromRGB(0, 0, 255)},
-		{Color3.fromRGB(0, 255, 0), Color3.fromRGB(0, 0, 0)},
-		{Color3.fromRGB(0, 0, 0), Color3.fromRGB(255, 255, 255)},
-	}
-	hooks.sliders["Color Preset"] = function(value)
-		notify(({"Red / Blue", "Green / Black", "Black / White"})[math.floor(value)]
-			.. " color preset selected")
+	local RP = {streams = {}, animations = {}, sent = 0, completed = 0, failed = 0,
+		nextRequest = -math.huge, lastTick = -math.huge, cursor = 0, alive = true}
+	controls.rpRuntime = RP
+	local order = {"name", "bio", "nameColor", "bioColor"}
+	local names = {name = {"UpdateRPName", "SetName"}, bio = {"UpdateBio", "SetBio"},
+		nameColor = {"UpdateRPColor", "SetNameColor"}, bioColor = {"UpdateBioColor", "SetBioColor"}}
+	local labelNames = {name = {rpname = true, rpnametext = true}, bio = {bio = true, biotext = true, rpbio = true}}
+	for _, channel in ipairs(order) do RP.streams[channel] = {names = names[channel], retryAt = 0} end
+	RP.Prefixes = function(value, maxCharacters)
+		value = controls.LimitText(value, 500)
+		local starts, prefixes = {}, {}
+		for position in utf8.codes(value) do table.insert(starts, position) end
+		for i = 1, math.min(#starts, maxCharacters or 80) do
+			prefixes[i] = value:sub(1, (starts[i + 1] or #value + 1) - 1)
+		end
+		return prefixes
 	end
-	local function phrases(name)
+	RP.Snapshot = function()
+		local character = player.Character
+		for channel, attribute in pairs({name = "RPName", bio = "Bio", nameColor = "RPColor", bioColor = "BioColor"}) do
+			local stream = RP.streams[channel]
+			if stream.original == nil then
+				for _, object in ipairs({player, character}) do
+					if object then
+						local okay, value = pcall(function() return object:GetAttribute(attribute) end)
+						if okay and ((channel == "name" or channel == "bio") and type(value) == "string"
+							or (channel == "nameColor" or channel == "bioColor") and typeof(value) == "Color3") then
+							stream.original = value; break
+						end
+					end
+				end
+			end
+		end
+		if character then
+			for _, object in ipairs(controls.CharacterItems(character).all) do
+				if object:IsA("TextLabel") then
+					for channel, accepted in pairs(labelNames) do
+						if accepted[object.Name:lower()] then
+							local stream, color = RP.streams[channel], RP.streams[channel .. "Color"]
+							if stream.original == nil then stream.original = object.Text end
+							if color.original == nil then color.original = object.TextColor3 end
+						end
+					end
+				end
+			end
+		end
+	end
+	RP.Set = function(channel, value, force)
+		local stream = RP.streams[channel]
+		if not stream or value == nil then return end
+		if channel == "name" or channel == "bio" then
+			local prefixes = RP.Prefixes(value)
+			value = prefixes[#prefixes] or ""
+		end
+		if not force and stream.value == value then return end
+		stream.value, stream.dirty = value, true
+		stream.touched = true
+		stream.version = (stream.version or 0) + 1
+	end
+	RP.Restore = function(channel, fallback)
+		local stream = RP.streams[channel]
+		if stream.original == nil and not stream.touched then return end
+		stream.dirty = false; stream.version = (stream.version or 0) + 1
+		local value = stream.original
+		if value == nil then value = fallback end
+		if value ~= nil then RP.Set(channel, value, true) end
+	end
+	RP.Send = function(channel, clock)
+		local stream = RP.streams[channel]
+		if not RP.alive or not gui.Parent or not stream.dirty or stream.pending or clock < stream.retryAt
+			or clock < RP.nextRequest then return false end
+		local remote = GameAdapter.Remote(stream.names)
+		if not remote then
+			stream.retryAt = clock + 3; RP.lastError = channel .. " remote unavailable"
+			return false
+		end
+		local value, version = stream.value, stream.version
+		stream.dirty, stream.pending, stream.pendingAt = false, true, clock
+		RP.nextRequest = clock + 0.1 -- Ten RP requests per second across all effects.
+		stream.thread = task.spawn(function()
+			if not RP.alive or not gui.Parent or stream.version ~= version then
+				stream.pending, stream.pendingAt = false, nil
+				return
+			end
+			local thread = coroutine.running() or RP
+			GameAdapter.ownCalls[thread] = true
+			RP.sent += 1
+			local okay, reply = pcall(function()
+				if remote:IsA("RemoteEvent") then remote:FireServer(value)
+				else return remote:InvokeServer(value) end
+			end)
+			GameAdapter.ownCalls[thread] = nil
+			stream.pending, stream.pendingAt = false, nil
+			if not RP.alive then return end
+			if okay and reply ~= false then
+				RP.completed += 1; stream.lastSentValue = value; stream.failures = 0
+			else
+				RP.failed += 1; stream.failures = (stream.failures or 0) + 1
+				RP.lastError = channel .. ": " .. (okay and "server returned false" or tostring(reply):sub(1, 100))
+				stream.retryAt = os.clock() + math.min(8, 0.5 * 2 ^ math.min(stream.failures - 1, 4))
+				if stream.version == version then stream.dirty = true end
+			end
+		end)
+		return true
+	end
+	local function phrases(field)
 		local result = {}
-		for phrase in (controls.texts[name] or ""):gmatch("[^,]+") do
-			local trimmed = phrase:match("^%s*(.-)%s*$")
-			if trimmed ~= "" then table.insert(result, trimmed:sub(1, 80)) end
+		for phrase in (controls.texts[field] or ""):gmatch("[^,]+") do
+			phrase = phrase:match("^%s*(.-)%s*$")
+			if phrase ~= "" then table.insert(result, phrase) end
+		end
+		if #result == 0 and (controls.texts["Bio Text"] or "") ~= "" then
+			result[1] = controls.texts["Bio Text"]
 		end
 		return result
 	end
-	local function bioRemote()
-		return GameAdapter.Remote({"UpdateBio", "SetBio"})
-	end
-	local function sendBio(value)
-		return GameAdapter.CallRemote(bioRemote(), value)
-	end
-	local function guardedRemote(names, feature)
+	local function guard(channel, feature)
 		if not inTargetExperience then return feature .. " is configured for Highschool Experience RP" end
-		if not GameAdapter.Remote(names) then return feature .. " remote is not exposed by this game" end
+		if not GameAdapter.Remote(names[channel]) then return feature .. " remote is unavailable in this server" end
 	end
+	runtimeGuards["Name Typewriter"] = function() return guard("name", "Name") end
 	runtimeGuards["Rainbow Colors"] = function()
-		if not GameAdapter.Remote({"UpdateRPColor", "SetNameColor"})
-			and not GameAdapter.Remote({"UpdateBioColor", "SetBioColor"}) then
-			return guardedRemote({"UpdateRPColor", "SetNameColor"}, "Color")
+		if not inTargetExperience then return "Colors are configured for Highschool Experience RP" end
+		if not GameAdapter.Remote(names.nameColor) and not GameAdapter.Remote(names.bioColor) then
+			return "RP color remotes are unavailable in this server"
 		end
 	end
-	runtimeGuards["Name Typewriter"] = function()
-		return guardedRemote({"UpdateRPName", "SetName"}, "Name")
+	for feature, field in pairs({["Bio Typewriter"] = "Bio Phrases", ["Bio Blinker"] = "Blink Phrases"}) do
+		runtimeGuards[feature] = function()
+			local reason = guard("bio", "Bio")
+			if reason then return reason end
+			if #phrases(field) == 0 then return "Enter Bio Text or " .. field .. " before enabling this effect" end
+		end
 	end
-	for _, name in ipairs({"Bio Typewriter", "Bio Blinker"}) do
-		runtimeGuards[name] = function()
-			return guardedRemote({"UpdateBio", "SetBio"}, "Bio")
+	local function start(feature)
+		RP.Snapshot(); RP.animations[feature] = nil
+	end
+	hooks.toggles["Name Typewriter"] = function(enabled)
+		if enabled then start("name")
+		else
+			RP.animations.name = nil
+			RP.Restore("name", controls.texts["RP Name"] or player.DisplayName or player.Name)
 		end
 	end
 	hooks.toggles["Bio Typewriter"] = function(enabled)
-		if enabled and controls.toggles["Bio Blinker"] then setToggle("Bio Blinker", false) end
+		if enabled then
+			if controls.toggles["Bio Blinker"] then setToggle("Bio Blinker", false) end
+			start("bio"); RP.streams.bio.dirty = false
+		else RP.animations.bio = nil; RP.Restore("bio", RP.fullBio or controls.texts["Bio Text"]) end
 	end
 	hooks.toggles["Bio Blinker"] = function(enabled)
-		if enabled and controls.toggles["Bio Typewriter"] then setToggle("Bio Typewriter", false) end
+		if enabled then
+			if controls.toggles["Bio Typewriter"] then setToggle("Bio Typewriter", false) end
+			start("blink"); RP.streams.bio.dirty = false
+		else RP.animations.blink = nil; RP.Restore("bio", RP.fullBio or controls.texts["Bio Text"]) end
 	end
-	hooks.toggles["Name Typewriter"] = function(enabled)
-		if not enabled then
-			GameAdapter.CallRemote(GameAdapter.Remote({"UpdateRPName", "SetName"}), player.DisplayName)
+	hooks.toggles["Rainbow Colors"] = function(enabled)
+		if enabled then start("color")
+		else RP.animations.color = nil; RP.Restore("nameColor"); RP.Restore("bioColor") end
+	end
+	hooks.sliders["Color Preset"] = function(value)
+		notify(({"Red / Blue", "Green / Black", "Black / White", "Rainbow"})[math.clamp(math.floor(value), 1, 4)] .. " selected")
+		RP.animations.color = nil
+		for _, channel in ipairs({"nameColor", "bioColor"}) do
+			local stream = RP.streams[channel]; stream.dirty = false; stream.version = (stream.version or 0) + 1
 		end
 	end
-	task.spawn(function()
-		local step = 0
-		while gui.Parent do
-			if controls.toggles["Rainbow Colors"] then
-				local colors = palettes[math.clamp(math.floor(controls.sliders["Color Preset"] or 1), 1, 3)]
-				step = step % #colors + 1
-				for _, names in ipairs({{"UpdateRPColor", "SetNameColor"},
-					{"UpdateBioColor", "SetBioColor"}}) do
-					GameAdapter.CallRemote(GameAdapter.Remote(names), colors[step])
-				end
-			end
-			task.wait(math.max(0.125, 1 / (controls.sliders["Color Speed"] or 8)))
+	for _, field in ipairs({"RP Name", "Bio Text", "Bio Phrases", "Blink Phrases"}) do
+		hooks.texts[field] = function()
+			table.clear(RP.animations)
+			local stream = RP.streams[field == "RP Name" and "name" or "bio"]
+			stream.dirty = false; stream.version = (stream.version or 0) + 1
 		end
-	end)
-	task.spawn(function()
-		while gui.Parent do
-			if controls.toggles["Name Typewriter"] then
-				local remote = GameAdapter.Remote({"UpdateRPName", "SetName"})
-				local name = player.DisplayName or player.Name
-				for i = 1, #name do
-					if not gui.Parent or not controls.toggles["Name Typewriter"] then break end
-					GameAdapter.CallRemote(remote, name:sub(1, i))
-					task.wait(1 / (controls.sliders["Name Speed"] or 5))
-				end
-				GameAdapter.CallRemote(remote, name)
+	end
+	actionHandlers["Apply RP Text"] = function()
+		local nameReason, bioReason = guard("name", "Name"), guard("bio", "Bio")
+		if nameReason and bioReason then notify(nameReason .. "; " .. bioReason); return end
+		setToggle("Name Typewriter", false); setToggle("Bio Typewriter", false); setToggle("Bio Blinker", false)
+		RP.Snapshot()
+		if not nameReason then RP.Set("name", controls.texts["RP Name"] or player.DisplayName or player.Name, true) end
+		if not bioReason then RP.Set("bio", controls.texts["Bio Text"] or "", true) end
+		notify("RP text queued")
+	end
+	actionHandlers["Reset RP Effects"] = function()
+		for _, feature in ipairs({"Name Typewriter", "Bio Typewriter", "Bio Blinker", "Rainbow Colors"}) do setToggle(feature, false) end
+		notify("RP effects stopped; captured original values queued for restore")
+	end
+	RP.Tick = function(clock)
+		if not RP.alive or not gui.Parent or not inTargetExperience or clock - RP.lastTick < 0.05 then return end
+		RP.lastTick = clock
+		if controls.toggles["Name Typewriter"] then
+			local value = controls.texts["RP Name"]
+			if not value or value == "" then value = player.DisplayName or player.Name end
+			local state = RP.animations.name
+			if not state or state.source ~= value then state = {source = value, prefixes = RP.Prefixes(value), index = 0, next = clock}; RP.animations.name = state end
+			if clock >= state.next and #state.prefixes > 0 then
+				state.index = state.index % #state.prefixes + 1
+				RP.Set("name", state.prefixes[state.index])
+				state.next = clock + (state.index == #state.prefixes and 0.8 or 1 / math.clamp(controls.sliders["Name Speed"] or 5, 1, 8))
 			end
-			task.wait(0.15)
 		end
-	end)
-	task.spawn(function()
-		while gui.Parent do
-			if controls.toggles["Bio Typewriter"] then
-				for _, phrase in ipairs(phrases("Bio Phrases")) do
-					for i = 1, #phrase do
-						if not gui.Parent or not controls.toggles["Bio Typewriter"] then break end
-						sendBio(phrase:sub(1, i))
-						task.wait(1 / (controls.sliders["Bio Speed"] or 15))
-					end
-					if not controls.toggles["Bio Typewriter"] then break end
-					sendBio(phrase)
-					task.wait(0.2)
-				end
+		if controls.toggles["Bio Typewriter"] then
+			local lines, state = phrases("Bio Phrases"), RP.animations.bio
+			if not state then state = {phrase = 1, index = 0, next = clock}; RP.animations.bio = state end
+			if clock >= state.next and #lines > 0 then
+				state.phrase = (state.phrase - 1) % #lines + 1
+				local prefixes = RP.Prefixes(lines[state.phrase])
+				state.index += 1
+				if state.index > #prefixes then state.index = 1; state.phrase = state.phrase % #lines + 1; prefixes = RP.Prefixes(lines[state.phrase]) end
+				RP.fullBio = prefixes[#prefixes] or ""
+				RP.Set("bio", prefixes[state.index] or "")
+				state.next = clock + (state.index == #prefixes and 0.8 or 1 / math.clamp(controls.sliders["Bio Speed"] or 15, 1, 8))
 			end
-			task.wait(0.15)
+		elseif controls.toggles["Bio Blinker"] then
+			local lines, state = phrases("Blink Phrases"), RP.animations.blink
+			if not state then state = {phrase = 1, visible = false, next = clock}; RP.animations.blink = state end
+			if clock >= state.next and #lines > 0 then
+				state.phrase = (state.phrase - 1) % #lines + 1
+				state.visible = not state.visible
+				RP.fullBio = lines[state.phrase]
+				RP.Set("bio", state.visible and RP.fullBio or "")
+				if not state.visible then state.phrase = state.phrase % #lines + 1 end
+				state.next = clock + 1 / math.clamp(controls.sliders["Blink Speed"] or 5, 1, 4)
+			end
 		end
-	end)
-	task.spawn(function()
-		local visible = false
-		while gui.Parent do
-			if controls.toggles["Bio Blinker"] then
-				for _, phrase in ipairs(phrases("Blink Phrases")) do
-					if not controls.toggles["Bio Blinker"] then break end
-					visible = not visible
-					sendBio(visible and phrase or "")
-					task.wait(math.max(0.1, 1 / (controls.sliders["Blink Speed"] or 5)))
+		if controls.toggles["Rainbow Colors"] then
+			local state = RP.animations.color
+			if not state then state = {step = 0, next = clock}; RP.animations.color = state end
+			if clock >= state.next then
+				state.step += 1
+				local preset = math.clamp(math.floor(controls.sliders["Color Preset"] or 4), 1, 4)
+				local color
+				if preset == 4 then color = Color3.fromHSV((clock * 0.12) % 1, 1, 1)
+				else
+					local palettes = {{Color3.fromRGB(255, 0, 0), Color3.fromRGB(0, 0, 255)},
+						{Color3.fromRGB(0, 255, 0), Color3.fromRGB(0, 0, 0)},
+						{Color3.fromRGB(0, 0, 0), Color3.fromRGB(255, 255, 255)}}
+					color = palettes[preset][(state.step - 1) % 2 + 1]
 				end
+				for _, channel in ipairs({"nameColor", "bioColor"}) do
+					if GameAdapter.Remote(names[channel]) then RP.Set(channel, color) end
+				end
+				state.next = clock + 1 / math.clamp(controls.sliders["Color Speed"] or 4, 1, 4)
 			end
-			task.wait(0.15)
+		end
+		for offset = 1, #order do
+			local index = (RP.cursor + offset - 1) % #order + 1
+			if RP.Send(order[index], clock) then RP.cursor = index; break end
+		end
+	end
+	local heartbeat = RunService.Heartbeat:Connect(function() RP.Tick(os.clock()) end)
+	gui.Destroying:Connect(function()
+		RP.alive = false; heartbeat:Disconnect()
+		for _, stream in pairs(RP.streams) do
+			stream.dirty = false
+			if stream.thread and stream.pending and type(task.cancel) == "function" then
+				if pcall(task.cancel, stream.thread) then GameAdapter.ownCalls[stream.thread] = nil; stream.pending = false end
+			end
+			if stream.original ~= nil then GameAdapter.CallRemote(GameAdapter.Remote(stream.names), stream.original) end
 		end
 	end)
 end
+
 task.spawn(function()
 	while gui.Parent do
-		if combatScanViews.found then
+		if combatScanViews.found and main.Visible and (activeTab == "Home" or activeTab == "Combat") then
 			local candidates, stats = scanTargets()
 			combatScanViews.found.Text = tostring(stats.found) .. " FOUND"
 			combatScanViews.ignored.Text = tostring(stats.ignored) .. " IGNORED"
 			combatScanViews.breakdown.Text = string.format(
-				"FRIENDS %d   WHITELIST %d   PROTECT %d",
-				stats.friends, stats.whitelist, stats.protect)
+				"FRIENDS %d   WHITELIST %d   PROTECT %d   CHECKING %d",
+				stats.friends, stats.whitelist, stats.protect, stats.checking)
 			combatScanViews.valid.Text = tostring(stats.valid) .. " VALID"
 			local names = {}
 			local limit = controls.toggles["Multi-Target Mode"]
-				and (controls.sliders["Max Targets"] or 100) or 1
+				and (controls.sliders["Max Targets"] or 1) or 1
 			for i = 1, math.min(#candidates, limit, 3) do
 				table.insert(names, candidates[i].player.DisplayName)
 			end
@@ -9790,80 +10145,59 @@ end)
 do
 	local attackedOnce, scanning = false, false
 	local lastTarget, lastTargetCharacter, ownCharacter
-	local lastAttack, epoch = -math.huge, -1
+	local lastAttempt, epoch = -math.huge, -1
 	local auraHeartbeat = RunService.Heartbeat:Connect(function()
 		if not gui.Parent or not inTargetExperience or not controls.toggles["Omega Aura"] then
 			attackedOnce, lastTarget, lastTargetCharacter = false, nil, nil
-			lastAttack = -math.huge
+			lastAttempt = -math.huge
 			return
 		end
-		-- Remember the previous character while Roblox clears Character during
-		-- respawn, so Repeat After Respawn also applies across that nil gap.
 		if not player.Character then return end
 		if ownCharacter ~= player.Character then
 			local respawned = ownCharacter ~= nil
-			ownCharacter = player.Character
-			GameAdapter.auraEpoch += 1
-			if respawned and not controls.toggles["Repeat After Respawn"] then
-				setToggle("Omega Aura", false)
-				return
-			end
+			ownCharacter = player.Character; GameAdapter.auraEpoch += 1
+			if respawned and not controls.toggles["Repeat After Respawn"] then setToggle("Omega Aura", false); return end
 		end
 		if epoch ~= GameAdapter.auraEpoch then
 			epoch = GameAdapter.auraEpoch
 			attackedOnce, lastTarget, lastTargetCharacter = false, nil, nil
-			lastAttack = -math.huge
+			lastAttempt = -math.huge
 		end
-		-- Both controls apply to direct combat. Heartbeat and unresolved
-		-- server calls also limit the number of dispatched requests.
-		local interval = GameAdapter.AuraRemote()
-			and math.max(1 / math.clamp(controls.sliders["Aura APS"] or 5000, 1, 10000),
-				controls.sliders["Attack Speed"] or 0.01)
-			or math.max(0.1, controls.sliders["Attack Speed"] or 0.2)
-		if scanning or os.clock() - lastAttack < interval then return end
+		local clock = os.clock()
+		if scanning or clock - lastAttempt < GameAdapter.Interval() then return end
+		-- Throttle attempts even with no targets, pending requests, or a rejection.
+		lastAttempt = clock
+		if GameAdapter.FightingState() == false or clock < GameAdapter.retryAt
+			or clock < GameAdapter.nextDispatch or GameAdapter.OldestRequest() >= GameAdapter.requestTimeout then return end
 		scanning = true
 		local requestEpoch = epoch
 		local okay, err = pcall(function()
 			local candidates = scanTargets()
-			if not gui.Parent or not controls.toggles["Omega Aura"]
-				or requestEpoch ~= GameAdapter.auraEpoch then return end
+			if not gui.Parent or not controls.toggles["Omega Aura"] or requestEpoch ~= GameAdapter.auraEpoch then return end
 			local lastTargetStillValid = false
 			for _, candidate in ipairs(candidates) do
-				if candidate.player == lastTarget and candidate.player.Character == lastTargetCharacter then
-					lastTargetStillValid = true
-					break
-				end
+				if candidate.player == lastTarget and candidate.player.Character == lastTargetCharacter then lastTargetStillValid = true; break end
 			end
 			if controls.toggles["Continuous Attack"] or not attackedOnce
 				or (controls.toggles["Auto Re-Target"] and not lastTargetStillValid) then
-				local limit = controls.toggles["Multi-Target Mode"]
-					and (controls.sliders["Max Targets"] or 100) or 1
-				if #candidates > 0 and limit > 0 then
-					local succeeded, target, targetCharacter = GameAdapter.Attack(candidates, limit)
-					if succeeded then
-						lastAttack = os.clock()
-						attackedOnce, lastTarget, lastTargetCharacter = true, target, targetCharacter
-					end
+				local limit = controls.toggles["Multi-Target Mode"] and (controls.sliders["Max Targets"] or 1) or 1
+				if #candidates > 0 then
+					local sent, target, character = GameAdapter.Attack(candidates, limit)
+					if sent then attackedOnce, lastTarget, lastTargetCharacter = true, target, character end
 				end
 			end
 		end)
 		scanning = false
 		if not okay then GameAdapter.lastCombatError = tostring(err):sub(1, 120) end
 	end)
-	gui.Destroying:Connect(function()
-		GameAdapter.auraEpoch += 1
-		auraHeartbeat:Disconnect()
-	end)
+	gui.Destroying:Connect(function() GameAdapter.auraEpoch += 1; auraHeartbeat:Disconnect() end)
 end
+
 hooks.toggles["Server-Wide Targeting"] = function(enabled)
 	if enabled then notify("Scanning loaded players across the server; the game controls accepted hit range") end
 end
 hooks.toggles["Multi-Target Mode"] = function(enabled)
-	if enabled then
-		notify(GameAdapter.AuraRemote()
-			and "AuraKill uses Max Targets; each target has one pending request at a time"
-			or "Existing gear input supports up to eight close touch targets")
-	end
+	if enabled then notify("Targets rotate across attacks; Max Targets sets the pool and Aura APS limits total requests") end
 end
 for _, name in ipairs({"Anti-Grab", "Anti-Carry Lock", "Break Carry", "Break Hold",
 	"Stop Ceiling Hold", "Stop Wall Pin", "Anti-Repeat Carry"}) do
@@ -9893,7 +10227,8 @@ local heartbeat = RunService.Heartbeat:Connect(function(dt)
 	if statusTick >= 1 then
 		local elapsed = math.floor(os.clock() - startTime)
 		sessionStatus.Text = string.format("SESSION  %02d:%02d", math.floor(elapsed / 60), elapsed % 60)
-		fpsStatus.Text = "FPS  " .. tostring(math.floor(frameCount / math.max(0.01, frameElapsed)))
+		controls.fps = math.floor(frameCount / math.max(0.01, frameElapsed))
+		fpsStatus.Text = "FPS  " .. tostring(controls.fps)
 		local active = 0
 		for name, enabled in pairs(controls.toggles) do
 			if enabled and name ~= "UI Animations" and name ~= "Kill Aura"
@@ -9923,10 +10258,11 @@ local heartbeat = RunService.Heartbeat:Connect(function(dt)
 		if trackedCharacter and not controls.toggles["Repeat After Respawn"] then
 			setToggle("Omega Aura", false)
 		end
-		clearFly(); restoreCollisions()
+		clearFly(); restoreCollisions(); controls.RestoreGhost()
 		trackedCharacter = character
 		baseWalkSpeed, baseJumpPower, baseUseJumpPower =
-			humanoid.WalkSpeed, humanoid.JumpPower, humanoid.UseJumpPower
+			(humanoid.WalkSpeed > 0 and humanoid.WalkSpeed or 16), (humanoid.JumpPower > 0 and humanoid.JumpPower or 50), humanoid.UseJumpPower
+		controls.baseJumpHeight = humanoid.JumpHeight > 0 and humanoid.JumpHeight or 7.2
 		wasSprinting, wasJumpModified = false, false
 		lastSafeCFrame = root.CFrame
 		originalTransparency = {}
@@ -9983,16 +10319,9 @@ local heartbeat = RunService.Heartbeat:Connect(function(dt)
 		root.AssemblyLinearVelocity = Vector3.zero
 		lastSafeCFrame = root.CFrame
 	end
-	if controls.toggles.NoClip then
-		for _, part in ipairs(character:GetDescendants()) do
-			if part:IsA("BasePart") then
-				if originalCollisions[part] == nil then originalCollisions[part] = part.CanCollide end
-				part.CanCollide = false
-			end
-		end
-	end
+
 	if controls.toggles["Ghost Mode"] then refreshGhost() end
-	if controls.toggles["Anti-Fling"] and (root.AssemblyLinearVelocity.Magnitude > 150
+	if controls.toggles["Anti-Fling"] and not controls.toggles.Fly and os.clock() >= dashEndAt and (root.AssemblyLinearVelocity.Magnitude > 150
 		or root.AssemblyAngularVelocity.Magnitude > 18) then
 		root.AssemblyLinearVelocity = Vector3.zero
 		root.AssemblyAngularVelocity = Vector3.zero
@@ -10028,9 +10357,10 @@ local heartbeat = RunService.Heartbeat:Connect(function(dt)
 			and humanoid.WalkSpeed <= 0 and baseWalkSpeed then
 			humanoid.WalkSpeed = baseWalkSpeed
 		end
-		if controls.toggles["Restore Jump"] then
-			humanoid.UseJumpPower = true
-			humanoid.JumpPower = baseJumpPower or 50
+		if controls.toggles["Restore Jump"] and not controls.toggles["Jump Power"] then
+			if humanoid.UseJumpPower then
+				if humanoid.JumpPower <= 0 then humanoid.JumpPower = baseJumpPower or 50 end
+			elseif humanoid.JumpHeight <= 0 then humanoid.JumpHeight = controls.baseJumpHeight or 7.2 end
 		end
 	end
 	if protectionStatusView then
