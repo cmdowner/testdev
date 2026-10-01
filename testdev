@@ -6,7 +6,9 @@
 -- Feature reference: https://github.com/KimDawude/MinuHub/blob/main/MinuHub
 -- Combat reference: the recovered AuraKill script supplied with this project.
 -- Unarmed combat, bounded request scheduling, and UTF-8 RP effects are implemented.
--- Revision: screen-click repair 2026-10-01. Screen Click input is the default combat mode.
+-- Revision: punch trace 2026-10-01. Combat > Trace Punch records a normal click.
+-- Trace first: choose NAMECALL (or METHODS for cached/dot calls), click Trace Punch,
+-- close the menu, land one normal punch, then Copy Punch Trace. Unknown calls are not replayed.
 -- Combat: keep Screen Click Combat on, enable Omega Aura, enter the fight area, close the menu, and face a nearby target.
 -- Screen Click uses normal attack input; the game controls targeting, range, and damage.
 -- Remote mode remains optional and requires a usable/learned combat route.
@@ -7490,6 +7492,9 @@ local function toggle(parent, name, x, y, width, compact)
 end
 
 local function formatNumber(value, spec)
+	if spec.name == "Trace Capture Mode" then
+		return value >= 1.5 and "METHODS" or "NAMECALL"
+	end
 	if spec.name == "Hit Position Mode" then
 		return ({"ORIGIN", "TARGET", "OFFSET", "AUTO"})[math.clamp(math.floor(value + 0.5), 1, 4)]
 	end
@@ -8039,6 +8044,9 @@ local definitions = {
 			{S("Aura APS", 1, 10, 5, 0, 1, "Inputs / Requests Per Second"),
 				S("Click Activation Range", 1, 30, 12, 0, 1, "Click Activation Radius"),
 				S("Hit Position Mode", 1, 4, 4, 0, 1, "Hit Arguments")}, {"Learn Punch", "Copy Diagnostics"}},
+		{"Punch Remote Trace", "Combat", {},
+			{S("Trace Capture Mode", 1, 2, 1, 0, 1, "Capture Method")},
+			{"Trace Punch", "Copy Punch Trace", "Clear Punch Trace"}},
 		{"Targeting & Attack Modes", "Targets", {
 			"Server-Wide Targeting", "Remote Strike", "Multi-Target Mode",
 			"Continuous Attack", "Auto Re-Target", "Target-Only Mode",
@@ -9433,6 +9441,217 @@ GameAdapter.CallRemote = function(remote, ...)
 	end)
 	return true
 end
+-- Read-only, user-armed tracing. Never replay or rewrite an unknown remote.
+GameAdapter.trace = {alive = true, running = false, phase = "idle", events = {}, recent = {},
+	clicks = {}, seen = 0, dropped = 0, maxRecords = 40, maxRecent = 16, maxClicks = 8}
+GameAdapter.TraceMode = function()
+	return (controls.sliders["Trace Capture Mode"] or 1) >= 1.5 and "Methods" or "Namecall"
+end
+GameAdapter.TraceTick = function()
+	local trace, clock = GameAdapter.trace, os.clock()
+	if not trace.running then return end
+	if not trace.alive or not gui.Parent then
+		trace.running, trace.phase, trace.stopReason = false, "stopped", "UI closed"
+	elseif clock >= trace.untilAt or (trace.captureUntil and clock >= trace.captureUntil) then
+		trace.running, trace.phase = false, "done"
+		trace.stopReason = trace.captureUntil and "Click window complete" or "No click before timeout"
+	end
+end
+GameAdapter.RecordTrace = function(remote, method, args, source)
+	local trace = GameAdapter.trace
+	GameAdapter.TraceTick()
+	if not trace.running or source ~= trace.mode or typeof(remote) ~= "Instance" then return end
+	local isA = remote.IsA
+	if method == "InvokeServer" then
+		if not isA(remote, "RemoteFunction") then return end
+	elseif method == "FireServer" then
+		if not isA(remote, "RemoteEvent") and not isA(remote, "UnreliableRemoteEvent") then return end
+	else return end
+	if type(args.n) ~= "number" or args.n < 0 or args.n % 1 ~= 0 then return end
+	local budget, seen = 96, {}
+	local function text(value, limit) return controls.LimitText(value, limit) end
+	local function number(value)
+		if value ~= value or math.abs(value) == math.huge then return {nonfinite = true} end
+		return value
+	end
+	local function snapshot(value, depth)
+		local kind = typeof(value)
+		budget -= 1
+		if budget < 0 or depth > 3 then return {type = kind, truncated = true} end
+		if value == nil then return {type = "nil"} end
+		if kind == "string" then
+			local clipped = text(value, 160)
+			return {type = kind, value = clipped, bytes = #value, truncated = #clipped < #value}
+		elseif kind == "number" then return {type = kind, value = number(value)}
+		elseif kind == "boolean" then return {type = kind, value = value}
+		elseif kind == "Instance" then
+			local okay, path = pcall(value.GetFullName, value)
+			return {type = kind, class = value.ClassName, path = okay and text(path, 240) or "Unavailable"}
+		elseif kind == "Vector3" or kind == "vector" then
+			return {type = kind, x = number(value.X), y = number(value.Y), z = number(value.Z)}
+		elseif kind == "Vector2" then return {type = kind, x = number(value.X), y = number(value.Y)}
+		elseif kind == "CFrame" then
+			local okay, parts = pcall(function() return table.pack(value.GetComponents(value)) end)
+			local components = {}
+			if okay then for i = 1, math.min(parts.n, 12) do components[i] = number(parts[i]) end end
+			return {type = kind, components = components, available = okay}
+		elseif kind == "Color3" then
+			return {type = kind, r = number(value.R), g = number(value.G), b = number(value.B)}
+		elseif kind == "EnumItem" then return {type = kind, value = tostring(value)}
+		elseif kind == "buffer" then
+			local okay, length = pcall(function() return buffer.len(value) end)
+			return {type = kind, bytes = okay and length or nil, contentsOmitted = true}
+		elseif kind == "table" then
+			if seen[value] then return {type = kind, repeatedReference = true} end
+			seen[value] = true
+			local result = {type = kind, entries = {}}
+			for key, item in pairs(value) do
+				if #result.entries >= 16 or budget <= 0 then result.truncated = true; break end
+				local hidden = type(key) == "string" and (key:lower():find("token", 1, true)
+					or key:lower():find("password", 1, true) or key:lower():find("secret", 1, true)
+					or key:lower():find("cookie", 1, true) or key:lower():find("authorization", 1, true))
+				table.insert(result.entries, {key = snapshot(key, depth + 1),
+					value = hidden and {type = typeof(item), redacted = true} or snapshot(item, depth + 1)})
+			end
+			return result
+		end
+		return {type = kind, unsupported = true}
+	end
+	local pathOkay, path = pcall(remote.GetFullName, remote)
+	local event = {at = os.clock() - trace.started, source = source, method = method,
+		remotePath = pathOkay and text(path, 240) or "Unavailable", remoteClass = remote.ClassName,
+		argumentCount = args.n, arguments = {}, argumentsTruncated = args.n > 32,
+		attemptOnly = true}
+	for i = 1, math.min(args.n, 32) do event.arguments[i] = snapshot(args[i], 0) end
+	trace.seen += 1
+	if trace.phase == "armed" then
+		table.insert(trace.recent, event)
+		if #trace.recent > trace.maxRecent then table.remove(trace.recent, 1); trace.dropped += 1 end
+	else
+		if #trace.events < trace.maxRecords then table.insert(trace.events, event)
+		else trace.dropped += 1; trace.running, trace.phase, trace.stopReason = false, "done", "Record limit reached" end
+	end
+end
+GameAdapter.TraceStart = function()
+	local trace, mode = GameAdapter.trace, GameAdapter.TraceMode()
+	if not inTargetExperience then notify("Open Highschool Experience RP first"); return false end
+	if mode == "Namecall" and not GameAdapter.observerAvailable then
+		notify("Namecall trace unavailable; try METHODS if supported"); return false
+	elseif mode == "Methods" and not GameAdapter.methodObserverAvailable then
+		notify("Method trace unavailable on this executor; try NAMECALL"); return false
+	end
+	setToggle("Omega Aura", false); setToggle("Spam Grab", false)
+	trace.running, trace.phase, trace.mode = true, "armed", mode
+	trace.started, trace.untilAt, trace.captureUntil = os.clock(), os.clock() + 20, nil
+	trace.seen, trace.dropped, trace.stopReason = 0, 0, nil
+	table.clear(trace.events); table.clear(trace.recent); table.clear(trace.clicks)
+	notify("Trace armed: close the menu and land ONE normal screen-click punch within 20 seconds, then Copy Punch Trace")
+	return true
+end
+GameAdapter.TraceClick = function(input, consumed)
+	local trace = GameAdapter.trace
+	GameAdapter.TraceTick()
+	if not trace.running or main.Visible or not input then return end
+	local kind = input.UserInputType
+	if kind ~= Enum.UserInputType.MouseButton1 and kind ~= Enum.UserInputType.Touch then return end
+	local okay, box = pcall(function() return UserInputService:GetFocusedTextBox() end)
+	if not okay or box ~= nil then return end
+	local position = input.Position
+	if not position then
+		local found, mouse = pcall(function() return UserInputService:GetMouseLocation() end)
+		if found then position = mouse end
+	end
+	local p, size = open.AbsolutePosition, open.AbsoluteSize
+	if position and open.Visible and position.X >= p.X and position.X <= p.X + size.X
+		and position.Y >= p.Y and position.Y <= p.Y + size.Y then return end
+	local at = os.clock() - trace.started
+	if #trace.clicks < trace.maxClicks then
+		table.insert(trace.clicks, {at = at, inputType = tostring(kind), processedByGame = consumed == true,
+			fighting = GameAdapter.FightingState()})
+	end
+	if trace.phase == "armed" then
+		trace.phase, trace.captureUntil = "capturing", math.min(trace.untilAt, os.clock() + 1.5)
+		for _, event in ipairs(trace.recent) do
+			if at - event.at <= 0.25 then table.insert(trace.events, event) end
+		end
+		table.clear(trace.recent)
+	end
+end
+GameAdapter.TraceReport = function()
+	local trace = GameAdapter.trace
+	GameAdapter.TraceTick()
+	local function correlated(events)
+		local result = {}
+		for _, event in ipairs(events) do
+			local copy, nearest, distance = table.clone(event), nil, math.huge
+			for index, click in ipairs(trace.clicks) do
+				local delta = math.abs(event.at - click.at)
+				if delta < distance then nearest, distance = index, delta end
+			end
+			copy.nearestClick = nearest; copy.nearClick = nearest ~= nil and distance <= 0.75
+			if nearest then copy.clickDeltaSeconds = distance end
+			table.insert(result, copy)
+		end
+		return result
+	end
+	return {revision = "ARG CORE V7 / punch trace 2026-10-01", placeId = game.PlaceId,
+		correctGame = inTargetExperience, mode = trace.mode or GameAdapter.TraceMode(),
+		phase = trace.phase, running = trace.running, stopReason = trace.stopReason,
+		capabilities = {namecall = GameAdapter.observerAvailable == true,
+			methods = GameAdapter.methodObserverAvailable == true, methodHooks = GameAdapter.methodHookCapabilities,
+			methodErrors = GameAdapter.methodHookErrors},
+		observedRemoteCalls = trace.seen, droppedRecords = trace.dropped,
+		maxRecords = trace.maxRecords, clicks = table.clone(trace.clicks),
+		events = correlated(trace.events), unmatchedRecent = correlated(trace.recent),
+		scope = "Attempted client calls near a manual click; proximity is not proof of a damage route",
+		automaticReplay = false, liveDamageVerified = false}
+end
+actionHandlers["Trace Punch"] = GameAdapter.TraceStart
+actionHandlers["Copy Punch Trace"] = function()
+	local trace = GameAdapter.trace
+	GameAdapter.TraceTick()
+	trace.running = false
+	if trace.phase == "armed" or trace.phase == "capturing" then
+		trace.phase, trace.stopReason = "stopped", "Export requested"
+	end
+	local okay, encoded = pcall(function() return HttpService:JSONEncode(GameAdapter.TraceReport()) end)
+	if not okay then notify("Trace export failed: " .. tostring(encoded)); return nil end
+	local env = executorGlobal()
+	local clipboard = setclipboard or toclipboard or setrbxclipboard or env.setclipboard
+	if type(clipboard) == "function" then
+		local copied = pcall(clipboard, encoded)
+		if copied then notify("Punch trace copied locally"); return encoded end
+	end
+	local writer = type(writefile) == "function" and writefile or env.writefile
+	if type(writer) == "function" and pcall(writer, "ARG_Core_Punch_Trace.json", encoded) then
+		notify("Saved ARG_Core_Punch_Trace.json in the executor workspace"); return encoded
+	end
+	notify("Trace is available in Copy Diagnostics; clipboard/file output unavailable")
+	return encoded
+end
+actionHandlers["Clear Punch Trace"] = function()
+	local trace = GameAdapter.trace
+	trace.running, trace.phase, trace.stopReason = false, "idle", nil
+	trace.seen, trace.dropped = 0, 0
+	table.clear(trace.events); table.clear(trace.recent); table.clear(trace.clicks)
+	notify("Punch trace cleared")
+end
+hooks.sliders["Trace Capture Mode"] = function()
+	local trace = GameAdapter.trace
+	if trace.running then trace.running, trace.phase, trace.stopReason = false, "stopped", "Capture method changed" end
+end
+do
+	local input = UserInputService.InputBegan:Connect(function(object, consumed)
+		pcall(GameAdapter.TraceClick, object, consumed)
+	end)
+	local heartbeat = RunService.Heartbeat:Connect(GameAdapter.TraceTick)
+	gui.Destroying:Connect(function()
+		GameAdapter.trace.alive, GameAdapter.trace.running = false, false
+		GameAdapter.trace.stopReason = "UI closed"
+		input:Disconnect(); heartbeat:Disconnect()
+	end)
+end
+
 do
 	local function targetArgument(value)
 		if typeof(value) ~= "Instance" then return nil end
@@ -9596,20 +9815,30 @@ do
 	end
 	local env, key = executorGlobal(), "ARG_CORE_V7_COMBAT_OBSERVER"
 	local observer = rawget(env, key)
-	local function dispatch(owner, remote, method, args)
+	local function dispatch(owner, remote, method, args, source)
+		source = source or "Namecall" -- Existing v2 wrappers call this with four arguments.
+		if owner.RecordTrace then owner.RecordTrace(remote, method, args, source) end
+		local learnerSource = owner.TraceMode and owner.TraceMode() or "Namecall"
+		if source ~= learnerSource then return end
 		if not owner.IsCombatRemote(remote, method) then return end
 		if owner.CaptureHit(args, remote, method) and owner.learnUntil then
 			owner.learnUntil = nil
 			notify("Unarmed punch learned; use AUTO Hit Arguments")
 		end
 	end
-	if type(observer) == "table" and observer.installed and observer.version == 2 then
-		observer.owner, observer.dispatch = GameAdapter, dispatch
-		GameAdapter.observerAvailable = true
-	elseif type(hookmetamethod) == "function" and type(getnamecallmethod) == "function" then
-		-- Disable the old observer when upgrading; install only once for this version.
+	if type(observer) == "table" and ((observer.version == 2 and observer.installed) or observer.version == 3) then
+		-- Both versions have dynamic owner/dispatch slots. Keep v3 method hooks
+		-- even when this executor could not install the namecall hook.
+		if observer.installed then observer.namecallInstalled = true end
+	else
 		if type(observer) == "table" then observer.owner = nil end
-		observer = {version = 2, owner = GameAdapter, dispatch = dispatch}
+		observer = {}
+	end
+	observer.version, observer.owner, observer.dispatch = 3, GameAdapter, dispatch
+	observer.methodHooks = observer.methodHooks or {}
+	observer.methodTargets = observer.methodTargets or {}
+	GameAdapter.observerAvailable = observer.namecallInstalled == true
+	if not observer.namecallInstalled and type(hookmetamethod) == "function" and type(getnamecallmethod) == "function" then
 		local previous
 		local function observe(remote, ...)
 			local method, owner = getnamecallmethod(), observer.owner
@@ -9618,7 +9847,7 @@ do
 				local args = table.pack(...)
 				pcall(function()
 					if type(checkcaller) == "function" and checkcaller() then return end
-					observer.dispatch(owner, remote, method, args)
+					observer.dispatch(owner, remote, method, args, "Namecall")
 				end)
 			end
 			if type(setnamecallmethod) == "function" then setnamecallmethod(method) end
@@ -9628,15 +9857,60 @@ do
 			return hookmetamethod(game, "__namecall", type(newcclosure) == "function" and newcclosure(observe) or observe)
 		end)
 		if okay and type(original) == "function" then
-			previous = original; observer.installed = true; env[key] = observer
+			previous = original; observer.installed, observer.namecallInstalled = true, true
 			GameAdapter.observerAvailable = true
 		else
-			observer.owner = nil; GameAdapter.observerAvailable = false
+			GameAdapter.observerAvailable = false
 			GameAdapter.observerError = tostring(original):sub(1, 160)
 		end
-	else GameAdapter.observerAvailable = false end
+	end
+	-- Optional method tracing covers cached/dot calls. Exactly one selected
+	-- capture source records traffic; neither path rewrites or replays calls.
+	GameAdapter.methodHookCapabilities, GameAdapter.methodHookErrors = {}, {}
+	GameAdapter.methodObserverAvailable = false
+	local hook = type(hookfunction) == "function" and hookfunction or env.hookfunction
+	for _, spec in ipairs({{"RemoteEvent", "FireServer"}, {"RemoteFunction", "InvokeServer"},
+		{"UnreliableRemoteEvent", "FireServer"}}) do
+		local class, method = spec[1], spec[2]
+		local label = class .. "." .. method
+		local entry = observer.methodHooks[label]
+		if not entry and type(hook) == "function" then
+			local proxy
+			local okay, result = pcall(function()
+				proxy = Instance.new(class)
+				local target = proxy[method]
+				if type(target) ~= "function" then error("Remote method unavailable") end
+				if observer.methodTargets[target] then return observer.methodTargets[target] end
+				local original
+				local function observeMethod(remote, ...)
+					local owner = observer.owner
+					if owner and not owner.ownCalls[coroutine.running() or owner] then
+						local args = table.pack(...)
+						pcall(function()
+							if type(checkcaller) == "function" and checkcaller() then return end
+							observer.dispatch(owner, remote, method, args, "Methods")
+						end)
+					end
+					return original(remote, ...)
+				end
+				original = hook(target, type(newcclosure) == "function" and newcclosure(observeMethod) or observeMethod)
+				if type(original) ~= "function" then error("Method hook did not return an original function") end
+				local installed = {available = true}
+				observer.methodTargets[target] = installed
+				return installed
+			end)
+			if proxy then pcall(function() proxy:Destroy() end) end
+			if okay then entry = result; observer.methodHooks[label] = entry
+			else GameAdapter.methodHookErrors[label] = tostring(result):sub(1, 160) end
+		end
+		GameAdapter.methodHookCapabilities[label] = entry and entry.available == true or false
+		if entry and entry.available then GameAdapter.methodObserverAvailable = true end
+	end
+	env[key] = observer
 	gui.Destroying:Connect(function()
-		if type(observer) == "table" and observer.owner == GameAdapter then observer.owner = nil end
+		if type(observer) == "table" and observer.owner == GameAdapter then
+			observer.owner, observer.dispatch = nil, nil
+		end
 	end)
 end
 GameAdapter.OldestRequest = function()
@@ -9775,7 +10049,11 @@ actionHandlers["Learn Punch"] = function()
 		notify("Screen Click input needs no learned remote. Disable Screen Click Combat to use remote learning")
 		return
 	end
-	if not GameAdapter.observerAvailable then notify("This executor cannot observe normal punch calls"); return end
+	local mode = GameAdapter.TraceMode()
+	if (mode == "Namecall" and not GameAdapter.observerAvailable)
+		or (mode == "Methods" and not GameAdapter.methodObserverAvailable) then
+		notify("The selected trace/learning method is unavailable on this executor"); return
+	end
 	setToggle("Omega Aura", false)
 	setSlider("Hit Position Mode", 4)
 	GameAdapter.learnUntil = os.clock() + 30
@@ -9783,6 +10061,11 @@ actionHandlers["Learn Punch"] = function()
 end
 GameAdapter.Status = function()
 	if not inTargetExperience then return "AURA: TARGET GAME MISMATCH" end
+	GameAdapter.TraceTick()
+	if GameAdapter.trace.running then
+		return string.format("TRACE: %s / %d CALLS / %d CLICKS", GameAdapter.trace.phase,
+			GameAdapter.trace.seen, #GameAdapter.trace.clicks)
+	end
 	if controls.toggles["Screen Click Combat"] then
 		local state = GameAdapter.click
 		if not GameAdapter.ClickAPI() then return "CLICK: EXECUTOR INPUT API UNAVAILABLE" end
@@ -9851,7 +10134,7 @@ do
 			if okay then state = tostring(value) end
 		end
 		return {
-			revision = "ARG CORE V7 / screen-click repair 2026-10-01", placeId = game.PlaceId,
+			revision = "ARG CORE V7 / punch trace 2026-10-01", placeId = game.PlaceId,
 			universeId = game.GameId, expectedPlaceId = TARGET_PLACE_ID, correctGame = inTargetExperience,
 			capabilities = {getconnections = type(getconnections) == "function",
 				hookmetamethod = type(hookmetamethod) == "function",
@@ -9859,7 +10142,8 @@ do
 				checkcaller = type(checkcaller) == "function", firetouchinterest = type(firetouchinterest) == "function",
 				clipboard = type(setclipboard or toclipboard or setrbxclipboard or env.setclipboard) == "function",
 				writefile = type(writefile) == "function",
-				screenClick = GameAdapter.ClickAPI() ~= nil},
+				screenClick = GameAdapter.ClickAPI() ~= nil,
+				methodTrace = GameAdapter.methodObserverAvailable == true},
 			combat = {exactRemote = GameAdapter.KnownAuraRemote() ~= nil, remotePath = remotePath,
 				learnedRoute = GameAdapter.learnedRemote ~= nil, fighting = GameAdapter.FightingState(),
 				mode = controls.toggles["Screen Click Combat"] and "ScreenClickInput" or GameAdapter.Mode,
@@ -9896,6 +10180,7 @@ do
 				state = state, platformStand = humanoid and humanoid.PlatformStand,
 				sitting = humanoid and humanoid.Sit, rootAnchored = root and root.Anchored,
 				walkSpeed = humanoid and humanoid.WalkSpeed, totalMotors = totalMotors, disabledMotors = disabledMotors},
+			punchTrace = GameAdapter.TraceReport(),
 			activeControls = active, unavailableControls = unavailableToggles,
 			unavailableSliders = unavailableSliders,
 		}
